@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: jfrog-agent-byor
+metadata:
+    template: azd-init@1.34.1
+services:
+    existing-project:
+        host: azure.ai.project
+        endpoint: https://kaiser-foundry-resource.services.ai.azure.com/api/projects/workshop-demo-project
+    private-registry-agent:
+        host: azure.ai.agent
+        uses:
+            - existing-project
+        kind: hosted
+        name: private-registry-agent
+        image: "trialrpqe22.jfrog.io/cl-docker/agent:0.1"
+        docker:
+            imagePassthrough: true
+        registryConnectionId: private-registry
+        protocols:
+            - protocol: responses
+              version: "2.0.0"

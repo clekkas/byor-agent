@@ -1,0 +1,41 @@
+# Offline build: installs from pre-downloaded wheels instead of reaching PyPI.
+# Use this when the Docker build cannot reach files.pythonhosted.org.
+#
+# Step 1 - on your host, where pip DOES work, download the wheels:
+#   python fetch_wheels.py           (echo mode, minimal deps - recommended)
+#   python fetch_wheels.py --full    (adds openai + azure-identity for model mode)
+#
+# Step 2 - build with no network access at all:
+#   docker build --platform linux/amd64 -f Dockerfile.offline -t byor-agent:0.1 .
+#
+# REQUIREMENTS_FILE defaults to the minimal echo-mode set. Override for model mode:
+#   docker build ... --build-arg REQUIREMENTS_FILE=requirements.txt
+#
+FROM --platform=linux/amd64 python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8088
+
+ARG REQUIREMENTS_FILE=requirements-min.txt
+
+WORKDIR /app
+
+COPY requirements*.txt ./
+COPY wheels/ /wheels/
+
+# --no-index forbids any network call; everything must come from /wheels.
+RUN pip install --no-cache-dir --no-index --find-links=/wheels -r ${REQUIREMENTS_FILE} \
+    && rm -rf /wheels
+
+COPY app.py .
+
+RUN useradd --create-home --uid 10001 agent
+USER 10001
+
+EXPOSE 8088
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request,os;urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"PORT\",\"8088\")}/healthz').read()" || exit 1
+
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT}"]

@@ -1,0 +1,56 @@
+# Proxy-aware build: passes corporate proxy settings and an optional root CA
+# into the build so pip can reach PyPI through the corporate egress path.
+#
+#   docker build --platform linux/amd64 -f Dockerfile.proxy -t byor-agent:0.1 `
+#     --build-arg HTTP_PROXY=$env:HTTP_PROXY `
+#     --build-arg HTTPS_PROXY=$env:HTTPS_PROXY `
+#     --build-arg PIP_INDEX_URL=$env:PIP_INDEX_URL `
+#     .
+#
+# If TLS inspection breaks pip, drop your corporate root CA into this folder as
+# corp-root.crt first - the build installs it into the image trust store.
+#
+FROM --platform=linux/amd64 python:3.12-slim
+
+# Build-time only. These are NOT persisted into the final image environment.
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+ARG NO_PROXY=""
+# Point at an internal mirror (Artifactory PyPI remote, Azure Artifacts feed, etc.)
+ARG PIP_INDEX_URL=""
+ARG PIP_TRUSTED_HOST=""
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8088
+
+WORKDIR /app
+
+# Optional corporate root CA for TLS-inspecting proxies.
+# Create an empty corp-root.crt if you don't need one - the COPY needs the file to exist.
+COPY corp-root.cr[t] /usr/local/share/ca-certificates/corp-root.crt
+RUN if [ -s /usr/local/share/ca-certificates/corp-root.crt ]; then \
+      apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+      && update-ca-certificates \
+      && rm -rf /var/lib/apt/lists/* ; \
+    else \
+      rm -f /usr/local/share/ca-certificates/corp-root.crt ; \
+    fi
+
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+RUN useradd --create-home --uid 10001 agent
+USER 10001
+
+EXPOSE 8088
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request,os;urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"PORT\",\"8088\")}/healthz').read()" || exit 1
+
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
