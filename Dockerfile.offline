@@ -29,6 +29,7 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels -r ${REQUIREMENTS
     && rm -rf /wheels
 
 COPY app.py .
+COPY knowledge/ ./knowledge/
 
 RUN useradd --create-home --uid 10001 agent
 USER 10001

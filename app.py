@@ -13,12 +13,17 @@ Two modes:
   - MODEL mode: set AZURE_AI_MODEL_DEPLOYMENT_NAME and the agent relays to that
     deployment through the Foundry project endpoint (FOUNDRY_PROJECT_ENDPOINT,
     injected by the platform) using the agent's own Entra identity.
+
+Knowledge: every knowledge/*.md file bundled in the image is added to the model
+instructions, so the agent can answer questions about this project's assets.
+Regenerate with scripts/generate-asset-inventory.ps1.
 """
 
 import json
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request
@@ -29,7 +34,35 @@ PORT = int(os.getenv("PORT", "8088"))
 MODEL_DEPLOYMENT = os.getenv("AZURE_AI_MODEL_DEPLOYMENT_NAME")
 # Injected by Foundry in hosted containers; set it yourself for local runs.
 PROJECT_ENDPOINT = os.getenv("FOUNDRY_PROJECT_ENDPOINT")
-INSTRUCTIONS = f"You are {APP_NAME}, a concise assistant."
+KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", Path(__file__).parent / "knowledge"))
+# Small, curated files are fine to send in full; switch to file_search if this grows.
+MAX_KNOWLEDGE_CHARS = 60_000
+
+
+def load_knowledge() -> List[Path]:
+    return sorted(KNOWLEDGE_DIR.glob("*.md")) if KNOWLEDGE_DIR.is_dir() else []
+
+
+def build_instructions(files: List[Path]) -> str:
+    base = f"You are {APP_NAME}, a concise assistant."
+    if not files:
+        return base
+    docs = "\n\n".join(
+        f'<document name="{f.name}">\n{f.read_text(encoding="utf-8")}\n</document>' for f in files
+    )[:MAX_KNOWLEDGE_CHARS]
+    return (
+        f"{base}\n\n"
+        "You also answer questions about this project's assets (Azure, Foundry, Entra ID, "
+        "JFrog, GitHub) using the knowledge base below. For project-specific facts, rely only "
+        "on the knowledge base and say so when something isn't covered. IDs are redacted on "
+        "purpose; never guess or invent them. Mention the generation date if asked how current "
+        "the information is.\n\n"
+        f"<knowledge_base>\n{docs}\n</knowledge_base>"
+    )
+
+
+KNOWLEDGE_FILES = load_knowledge()
+INSTRUCTIONS = build_instructions(KNOWLEDGE_FILES)
 
 app = FastAPI(title=APP_NAME)
 
@@ -40,7 +73,7 @@ def get_model_client():
     """Lazily build an OpenAI client for the project endpoint using the agent's Entra identity.
 
     The hosted-agent identity can call models through the project endpoint by default, so no
-    extra role assignment is needed (each agent version gets a new identity).
+    extra role assignment is needed (the identity is platform-managed and can change).
     """
     global _client
     if _client is not None:
@@ -115,7 +148,12 @@ def envelope(text: str, response_id: str, status: str = "completed") -> Dict[str
 @app.get("/readiness")
 @app.get("/liveness")
 def healthz():
-    return {"status": "ok", "agent": APP_NAME, "mode": "model" if MODEL_DEPLOYMENT else "echo"}
+    return {
+        "status": "ok",
+        "agent": APP_NAME,
+        "mode": "model" if MODEL_DEPLOYMENT else "echo",
+        "knowledge": [f.name for f in KNOWLEDGE_FILES],
+    }
 
 
 @app.post("/responses")

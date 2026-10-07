@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - app.py
+      - knowledge/**
       - requirements*.txt
       - Dockerfile
       - azure.yaml

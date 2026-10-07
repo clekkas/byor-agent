@@ -11,6 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY knowledge/ ./knowledge/
 
 # Non-root: the registry-pulled image should not need privileges.
 RUN useradd --create-home --uid 10001 agent
