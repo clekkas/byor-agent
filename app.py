@@ -4,7 +4,8 @@ Minimal Microsoft Foundry hosted agent - Responses protocol 2.0.0.
 Container contract:
   - Listens on $PORT (default 8088) on 0.0.0.0
   - POST /responses            -> create a response (non-streaming and SSE streaming)
-  - GET  /healthz              -> liveness/readiness
+  - GET  /readiness, /liveness -> Foundry hosted-agent health probes
+  - GET  /healthz              -> local/Docker health check
 
 Two modes:
   - ECHO mode (default): no model call. Proves the image was pulled from the
@@ -116,6 +117,8 @@ def envelope(text: str, response_id: str, status: str = "completed") -> Dict[str
 
 
 @app.get("/healthz")
+@app.get("/readiness")
+@app.get("/liveness")
 def healthz():
     return {"status": "ok", "agent": APP_NAME, "mode": "model" if MODEL_DEPLOYMENT else "echo"}
 

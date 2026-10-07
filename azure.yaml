@@ -13,7 +13,7 @@ services:
             - existing-project
         kind: hosted
         name: private-registry-agent
-        image: "trialrpqe22.jfrog.io/cl-docker/agent:0.1"
+        image: "trialndswdc.jfrog.io/byor-demo-docker/agent:0.2"
         docker:
             imagePassthrough: true
         registryConnectionId: private-registry

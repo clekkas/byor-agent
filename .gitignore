@@ -1,1 +1,12 @@
 .azure
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+infra/**/terraform.tfvars
+infra/**/backend.hcl
+
+# Local environment notes
+jfrog-oidc-setup.txt

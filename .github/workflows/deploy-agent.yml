@@ -1,0 +1,206 @@
+name: Build and deploy hosted agent
+
+# Build -> push to JFrog (GitHub OIDC) -> terraform apply registry connection (Azure OIDC)
+# -> azd deploy hosted agent -> smoke test. No stored secrets; run
+# scripts/bootstrap-github-oidc.ps1 once to create the identity and repo variables.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - app.py
+      - requirements*.txt
+      - Dockerfile
+      - azure.yaml
+      - infra/**
+      - .github/workflows/deploy-agent.yml
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Deploy an existing image tag instead of building (leave empty to build)
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: hosted-agent-deployment
+  cancel-in-progress: false
+
+env:
+  AGENT_SERVICE: private-registry-agent
+
+jobs:
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image reference
+        id: meta
+        env:
+          JF_URL: ${{ vars.JF_URL }}
+          JFROG_REPO: ${{ vars.JFROG_REPO }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          host="${JF_URL#https://}"
+          tag="${INPUT_TAG:-sha-${GITHUB_SHA::7}}"
+          echo "host=${host}" >> "$GITHUB_OUTPUT"
+          echo "image=${host}/${JFROG_REPO}/agent:${tag}" >> "$GITHUB_OUTPUT"
+          echo "build=$([ -z "${INPUT_TAG}" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: JFrog login (GitHub OIDC)
+        id: jfrog
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ vars.JF_URL }}
+        with:
+          oidc-provider-name: ${{ vars.JFROG_GITHUB_OIDC_PROVIDER }}
+          disable-job-summary: true
+          disable-auto-build-publish: true
+
+      - name: Docker login to JFrog
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.meta.outputs.host }}
+          username: ${{ steps.jfrog.outputs.oidc-user }}
+          password: ${{ steps.jfrog.outputs.oidc-token }}
+
+      - name: Build (linux/amd64)
+        if: steps.meta.outputs.build == 'true'
+        run: docker build --platform linux/amd64 -t "${{ steps.meta.outputs.image }}" .
+
+      - name: Smoke test container
+        if: steps.meta.outputs.build == 'true'
+        run: |
+          cid=$(docker run -d --rm -p 8088:8088 "${{ steps.meta.outputs.image }}")
+          trap 'docker stop "$cid" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8088/readiness >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://localhost:8088/readiness
+          curl -fsS http://localhost:8088/liveness
+          curl -fsS -X POST http://localhost:8088/responses \
+            -H 'Content-Type: application/json' \
+            -d '{"input":"ci smoke test"}' | tee /tmp/resp.json
+          grep -q '"status":"completed"' /tmp/resp.json
+
+      - name: Push
+        if: steps.meta.outputs.build == 'true'
+        run: docker push "${{ steps.meta.outputs.image }}"
+
+      - name: Verify image exists in JFrog
+        run: docker manifest inspect "${{ steps.meta.outputs.image }}" >/dev/null
+
+  deploy:
+    name: Registry connection + agent deploy
+    needs: build
+    # Self-hosted runner inside the VNet: Terraform state is only reachable via private endpoint.
+    runs-on: [self-hosted, linux, "${{ vars.RUNNER_LABEL }}"]
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      # Terraform azapi provider + azurerm backend authenticate with GitHub OIDC.
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      TF_VAR_resource_group_name: ${{ vars.AZURE_RESOURCE_GROUP }}
+      TF_VAR_foundry_account_name: ${{ vars.FOUNDRY_ACCOUNT_NAME }}
+      TF_VAR_foundry_project_name: ${{ vars.FOUNDRY_PROJECT_NAME }}
+      TF_VAR_connection_name: ${{ vars.REGISTRY_CONNECTION_NAME }}
+      TF_VAR_registry_target: ${{ vars.JF_URL }}
+      TF_VAR_token_audience: ${{ vars.REGISTRY_TOKEN_AUDIENCE }}
+      TF_VAR_token_endpoint: ${{ vars.REGISTRY_TOKEN_ENDPOINT }}
+      TF_VAR_oidc_provider_name: ${{ vars.REGISTRY_OIDC_PROVIDER_NAME }}
+      TF_VAR_import_existing_connection: ${{ vars.REGISTRY_IMPORT_EXISTING }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init (remote state)
+        working-directory: infra/registry-connection
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.RS_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.RS_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.RS_CONTAINER_NAME }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
+            -backend-config="use_azuread_auth=true"
+
+      - name: Terraform plan
+        working-directory: infra/registry-connection
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply
+        working-directory: infra/registry-connection
+        run: |
+          terraform apply -input=false tfplan
+          rm -f tfplan
+
+      # azd is preinstalled on the runner VM (infra/ci-runner/cloud-init.yaml).
+      - name: Check azd
+        run: azd version
+
+      - name: Install Foundry agents extension
+        run: azd extension install azure.ai.agents --no-prompt
+
+      - name: azd login (GitHub OIDC)
+        run: azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+
+      - name: Configure azd environment
+        run: |
+          project_id="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${{ vars.AZURE_RESOURCE_GROUP }}/providers/Microsoft.CognitiveServices/accounts/${{ vars.FOUNDRY_ACCOUNT_NAME }}/projects/${{ vars.FOUNDRY_PROJECT_NAME }}"
+          azd env new "$AZURE_ENV_NAME" --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
+          azd env set AZURE_TENANT_ID "$AZURE_TENANT_ID"
+          azd env set AZURE_RESOURCE_GROUP "${{ vars.AZURE_RESOURCE_GROUP }}"
+          azd env set AZURE_AI_ACCOUNT_NAME "${{ vars.FOUNDRY_ACCOUNT_NAME }}"
+          azd env set AZURE_AI_PROJECT_NAME "${{ vars.FOUNDRY_PROJECT_NAME }}"
+          azd env set AZURE_AI_PROJECT_ID "$project_id"
+          azd env set FOUNDRY_PROJECT_ENDPOINT "${{ vars.FOUNDRY_PROJECT_ENDPOINT }}"
+          azd env set ENABLE_HOSTED_AGENTS true
+
+      - name: Point azure.yaml at the built image
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          CONNECTION: ${{ vars.REGISTRY_CONNECTION_NAME }}
+        run: |
+          sed -i -E "s|^([[:space:]]*image:[[:space:]]*).*|\1\"${IMAGE}\"|" azure.yaml
+          grep -E "image:|registryConnectionId:" azure.yaml
+          grep -Eq "registryConnectionId:[[:space:]]*\"?${CONNECTION}\"?[[:space:]]*$" azure.yaml \
+            || { echo "::error::azure.yaml registryConnectionId does not match ${CONNECTION}"; exit 1; }
+
+      - name: Deploy agent
+        run: azd deploy "$AGENT_SERVICE" --no-prompt
+
+      - name: Smoke test deployed agent
+        run: |
+          for i in 1 2 3; do
+            if azd ai agent invoke "$AGENT_SERVICE" "Respond with a short deployment confirmation." --no-prompt --output raw | tee /tmp/invoke.txt | grep -q "response.completed"; then
+              echo "Agent responded."; exit 0
+            fi
+            echo "Attempt $i failed; retrying in 30s"; sleep 30
+          done
+          cat /tmp/invoke.txt
+          exit 1
+
+      # Persistent runner: don't leave credentials behind between jobs.
+      - name: Sign out
+        if: always()
+        run: azd auth logout || true
