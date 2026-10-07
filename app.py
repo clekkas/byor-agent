@@ -21,6 +21,7 @@ Regenerate with scripts/generate-asset-inventory.ps1.
 
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -56,7 +57,8 @@ def build_instructions(files: List[Path]) -> str:
         "JFrog, GitHub) using the knowledge base below. For project-specific facts, rely only "
         "on the knowledge base and say so when something isn't covered. IDs are redacted on "
         "purpose; never guess or invent them. Mention the generation date if asked how current "
-        "the information is.\n\n"
+        "the information is. Answer only from the inventory. If the question is not about "
+        "something in the inventory, say so and do not guess.\n\n"
         f"<knowledge_base>\n{docs}\n</knowledge_base>"
     )
 
@@ -111,7 +113,29 @@ def flatten_input(payload: Dict[str, Any]) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
+# Scope gate: answer only questions that mention an inventory term; checked in code, no model call.
+SCOPE_BLOCKED_REPLY = "Not in the inventory. Checked by code; the model was not called."
+
+
+def build_scope_terms(files: List[Path]) -> set:
+    terms = set()
+    for f in files:
+        text = f.read_text(encoding="utf-8")
+        for heading in re.findall(r"^#{1,6} (.+)$", text, re.MULTILINE):
+            terms.update(re.findall(r"[a-z0-9][a-z0-9._/-]*", heading.replace("`", "").lower()))
+        terms.update(name.lower() for name in re.findall(r"`([^`\n]+)`", text))
+    # Short tokens ("in", "id", "ci") are substrings of ordinary words and would let anything through.
+    return {t for t in terms if len(t) >= 4}
+
+
+SCOPE_TERMS = build_scope_terms(KNOWLEDGE_FILES)
+
+
 def answer(prompt: str) -> str:
+    in_scope = any(term in prompt.lower() for term in SCOPE_TERMS)
+    print(f"scope_gate={'pass' if in_scope else 'blocked'}", flush=True)
+    if not in_scope:
+        return SCOPE_BLOCKED_REPLY
     client = get_model_client()
     if client is None:
         return (

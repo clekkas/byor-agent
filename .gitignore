@@ -10,3 +10,4 @@ infra/**/backend.hcl
 
 # Local environment notes
 jfrog-oidc-setup.txt
+session-log.txt
