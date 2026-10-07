@@ -34,12 +34,12 @@ python -m pip install --quiet --upgrade pip
 python -m pip install --quiet -r requirements.txt
 
 if ($env:MODEL -eq "1") {
-    if (-not $env:AZURE_OPENAI_ENDPOINT) { throw "Set AZURE_OPENAI_ENDPOINT" }
+    if (-not $env:FOUNDRY_PROJECT_ENDPOINT) { throw "Set FOUNDRY_PROJECT_ENDPOINT (https://<account>.services.ai.azure.com/api/projects/<project>)" }
     if (-not $env:AZURE_AI_MODEL_DEPLOYMENT_NAME) { throw "Set AZURE_AI_MODEL_DEPLOYMENT_NAME" }
-    Write-Host "==> MODEL mode -> $env:AZURE_AI_MODEL_DEPLOYMENT_NAME @ $env:AZURE_OPENAI_ENDPOINT"
+    Write-Host "==> MODEL mode -> $env:AZURE_AI_MODEL_DEPLOYMENT_NAME @ $env:FOUNDRY_PROJECT_ENDPOINT"
 } else {
     Remove-Item Env:AZURE_AI_MODEL_DEPLOYMENT_NAME -ErrorAction SilentlyContinue
-    Remove-Item Env:AZURE_OPENAI_ENDPOINT -ErrorAction SilentlyContinue
+    Remove-Item Env:FOUNDRY_PROJECT_ENDPOINT -ErrorAction SilentlyContinue
     Write-Host "==> ECHO mode (no model call)"
 }
 

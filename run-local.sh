@@ -51,12 +51,12 @@ python -m pip install --quiet --upgrade pip
 python -m pip install --quiet -r requirements.txt
 
 if [ "${MODEL:-0}" = "1" ]; then
-  : "${AZURE_OPENAI_ENDPOINT:?set AZURE_OPENAI_ENDPOINT, e.g. https://<account>.openai.azure.com}"
-  : "${AZURE_AI_MODEL_DEPLOYMENT_NAME:?set AZURE_AI_MODEL_DEPLOYMENT_NAME, e.g. gpt-4o-mini}"
-  echo "==> MODEL mode -> ${AZURE_AI_MODEL_DEPLOYMENT_NAME} @ ${AZURE_OPENAI_ENDPOINT}"
+  : "${FOUNDRY_PROJECT_ENDPOINT:?set FOUNDRY_PROJECT_ENDPOINT, e.g. https://<account>.services.ai.azure.com/api/projects/<project>}"
+  : "${AZURE_AI_MODEL_DEPLOYMENT_NAME:?set AZURE_AI_MODEL_DEPLOYMENT_NAME, e.g. gpt-5-mini}"
+  echo "==> MODEL mode -> ${AZURE_AI_MODEL_DEPLOYMENT_NAME} @ ${FOUNDRY_PROJECT_ENDPOINT}"
   echo "    (DefaultAzureCredential will use your 'az login' identity locally)"
 else
-  unset AZURE_AI_MODEL_DEPLOYMENT_NAME AZURE_OPENAI_ENDPOINT 2>/dev/null || true
+  unset AZURE_AI_MODEL_DEPLOYMENT_NAME FOUNDRY_PROJECT_ENDPOINT 2>/dev/null || true
   echo "==> ECHO mode (no model call)"
 fi
 

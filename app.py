@@ -10,8 +10,9 @@ Container contract:
 Two modes:
   - ECHO mode (default): no model call. Proves the image was pulled from the
     private registry and the container started. Use this for the first deploy.
-  - MODEL mode: set AZURE_AI_MODEL_DEPLOYMENT_NAME and AZURE_OPENAI_ENDPOINT and
-    the agent relays to that deployment using the runtime managed identity.
+  - MODEL mode: set AZURE_AI_MODEL_DEPLOYMENT_NAME and the agent relays to that
+    deployment through the Foundry project endpoint (FOUNDRY_PROJECT_ENDPOINT,
+    injected by the platform) using the agent's own Entra identity.
 """
 
 import json
@@ -26,9 +27,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 APP_NAME = os.getenv("AGENT_NAME", "private-registry-agent")
 PORT = int(os.getenv("PORT", "8088"))
 MODEL_DEPLOYMENT = os.getenv("AZURE_AI_MODEL_DEPLOYMENT_NAME")
-AOAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-# Override if your deployment needs a different API version.
-AOAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
+# Injected by Foundry in hosted containers; set it yourself for local runs.
+PROJECT_ENDPOINT = os.getenv("FOUNDRY_PROJECT_ENDPOINT")
+INSTRUCTIONS = f"You are {APP_NAME}, a concise assistant."
 
 app = FastAPI(title=APP_NAME)
 
@@ -36,23 +37,22 @@ _client = None
 
 
 def get_model_client():
-    """Lazily build an Azure OpenAI client using the container's managed identity."""
+    """Lazily build an OpenAI client for the project endpoint using the agent's Entra identity.
+
+    The hosted-agent identity can call models through the project endpoint by default, so no
+    extra role assignment is needed (each agent version gets a new identity).
+    """
     global _client
     if _client is not None:
         return _client
-    if not (MODEL_DEPLOYMENT and AOAI_ENDPOINT):
+    if not (MODEL_DEPLOYMENT and PROJECT_ENDPOINT):
         return None
     from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-    from openai import AzureOpenAI
+    from openai import OpenAI
 
-    token_provider = get_bearer_token_provider(
-        DefaultAzureCredential(),
-        "https://cognitiveservices.azure.com/.default",
-    )
-    _client = AzureOpenAI(
-        azure_endpoint=AOAI_ENDPOINT,
-        azure_ad_token_provider=token_provider,
-        api_version=AOAI_API_VERSION,
+    _client = OpenAI(
+        base_url=f"{PROJECT_ENDPOINT.rstrip('/')}/openai/v1",
+        api_key=get_bearer_token_provider(DefaultAzureCredential(), "https://ai.azure.com/.default"),
     )
     return _client
 
@@ -85,14 +85,9 @@ def answer(prompt: str) -> str:
             f"[{APP_NAME}] Hosted agent is running from a private registry image. "
             f"Echo mode (no model deployment configured). You said: {prompt!r}"
         )
-    messages = [
-        {"role": "system", "content": f"You are {APP_NAME}, a concise assistant."},
-        {"role": "user", "content": prompt},
-    ]
-    # Reasoning models (gpt-5 family) reject some legacy sampling parameters, so we
-    # send none of them. Only the deployment name and the messages are required.
-    result = client.chat.completions.create(model=MODEL_DEPLOYMENT, messages=messages)
-    return result.choices[0].message.content or ""
+    # Reasoning models (gpt-5 family) reject legacy sampling parameters, so none are sent.
+    result = client.responses.create(model=MODEL_DEPLOYMENT, instructions=INSTRUCTIONS, input=prompt)
+    return result.output_text or ""
 
 
 def envelope(text: str, response_id: str, status: str = "completed") -> Dict[str, Any]:

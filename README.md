@@ -19,7 +19,7 @@ Minimal Foundry hosted agent image for the "bring your own registry" (JFrog + OI
 ## Modes
 
 - **Echo mode (default).** No model call. Proves Foundry exchanged the OIDC token, pulled the image from JFrog, and started the container. Use this for the first deploy — it isolates the registry plumbing from everything else.
-- **Model mode.** Set `AZURE_AI_MODEL_DEPLOYMENT_NAME` and `AZURE_OPENAI_ENDPOINT` in the agent's `env` map and the agent relays to that deployment using the runtime managed identity. No keys in the image.
+- **Model mode.** Set `AZURE_AI_MODEL_DEPLOYMENT_NAME` (e.g. `gpt-5-mini`) in the agent's `env` map in `azure.yaml`. The agent calls the Responses API on the Foundry project endpoint (`FOUNDRY_PROJECT_ENDPOINT`, injected by the platform) with its own Entra identity. The image holds no keys, and you don't need to assign roles because each agent version gets a new identity that can reach project models by default. For local runs, also set `FOUNDRY_PROJECT_ENDPOINT`.
 
 ## Run it
 
