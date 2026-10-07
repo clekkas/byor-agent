@@ -115,24 +115,31 @@ def flatten_input(payload: Dict[str, Any]) -> str:
 
 # Scope gate: answer only questions that mention an inventory term; checked in code, no model call.
 SCOPE_BLOCKED_REPLY = "Not in the inventory. Checked by code; the model was not called."
+SCOPE_WORDS = {"jfrog", "foundry", "terraform", "github", "entra", "azure", "runner", "tenant",
+               "subscription", "repository", "image", "connection", "workflow", "version", "inventory"}
+# Too generic to signal scope, even where they appear as backticked names (job/branch names, "@").
+SCOPE_EXCLUDED = {"agent", "model", "state", "main", "build", "deploy", "project", "network", "@"}
 
 
 def build_scope_terms(files: List[Path]) -> set:
-    terms = set()
-    for f in files:
-        text = f.read_text(encoding="utf-8")
-        for heading in re.findall(r"^#{1,6} (.+)$", text, re.MULTILINE):
-            terms.update(re.findall(r"[a-z0-9][a-z0-9._/-]*", heading.replace("`", "").lower()))
-        terms.update(name.lower() for name in re.findall(r"`([^`\n]+)`", text))
-    # Short tokens ("in", "id", "ci") are substrings of ordinary words and would let anything through.
-    return {t for t in terms if len(t) >= 4}
+    if not files:
+        return set()
+    names = {n.lower() for f in files for n in re.findall(r"`([^`\n]+)`", f.read_text(encoding="utf-8"))}
+    return (names | SCOPE_WORDS) - SCOPE_EXCLUDED
+
+
+def term_in(term: str, text: str) -> bool:
+    # Plain words match whole words only; terms with punctuation (hosts, paths) match as substrings.
+    if re.fullmatch(r"[a-z0-9]+", term):
+        return re.search(rf"\b{term}\b", text) is not None
+    return term in text
 
 
 SCOPE_TERMS = build_scope_terms(KNOWLEDGE_FILES)
 
 
 def answer(prompt: str) -> str:
-    in_scope = any(term in prompt.lower() for term in SCOPE_TERMS)
+    in_scope = any(term_in(term, prompt.lower()) for term in SCOPE_TERMS)
     print(f"scope_gate={'pass' if in_scope else 'blocked'}", flush=True)
     if not in_scope:
         return SCOPE_BLOCKED_REPLY
