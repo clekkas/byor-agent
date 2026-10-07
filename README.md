@@ -102,7 +102,7 @@ Manual dispatch accepts `image_tag` to redeploy an existing image without buildi
 2. `./scripts/setup-runner.ps1 -Location swedencentral`. Uses Terraform (AzAPI, local state) to create a VNet, a private endpoint and DNS for the state account, and an Ubuntu VM without a public IP or inbound access. It then registers the VM as a repo runner through `az vm run-command`.
 3. In JFrog, add an OpenID Connect integration for GitHub:
    - Provider type `GitHub`, name `github-oidc`, provider URL `https://token.actions.githubusercontent.com`.
-   - Identity mapping claims `{"repository":"clekkas/byor-agent","ref":"refs/heads/main"}`, scoped to a group or user with Read + Deploy/Cache on `byor-demo-docker`.
+   - Identity mapping claims `{"repository":"clekkas/byor-agent","ref":"refs/heads/main"}`, scoped to a group or user with Read + Deploy/Cache on the **local** Docker repo that backs `byor-demo-docker` (`byor-demo-docker-local`). Pushes to a virtual repo land in its default deployment repo.
 
 ### Notes
 

@@ -123,13 +123,16 @@ if (-not $spId) {
     Write-Host "  + created service principal $spId"
 } else { Write-Host "  = service principal $spId" }
 
-$subject = "repo:${Repo}:ref:refs/heads/$Branch"
+# GitHub may issue ID-based ("immutable") subjects, e.g. repo:owner@123/repo@456:...; use whatever prefix the repo reports.
+$subPrefix = & gh api "repos/$Repo/actions/oidc/customization/sub" --jq '.sub_claim_prefix // empty' 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $subPrefix) { $subPrefix = "repo:$Repo" }
+$subject = "$($subPrefix.Trim()):ref:refs/heads/$Branch"
 $fics = Invoke-Az ad app federated-credential list --id $appId -o json | ConvertFrom-Json
 if ($fics | Where-Object { $_.subject -eq $subject }) {
     Write-Host "  = federated credential for $subject"
 } else {
     $fic = @{
-        name      = "github-$($Repo.Replace('/', '-'))-$Branch"
+        name      = "github-$($Repo.Replace('/', '-'))-$Branch$(if ($subPrefix -match '@') { '-ids' })"
         issuer    = 'https://token.actions.githubusercontent.com'
         subject   = $subject
         audiences = @('api://AzureADTokenExchange')
@@ -223,7 +226,7 @@ Write-Host @"
     Provider URL  : https://token.actions.githubusercontent.com
   Identity mapping on that integration:
     Claims JSON   : {"repository":"$Repo","ref":"refs/heads/$Branch"}
-    Token scope   : a group/user with Read + Deploy/Cache on '$JfrogRepo'
+    Token scope   : a group/user with Read + Deploy/Cache on the LOCAL repo behind '$JfrogRepo' (e.g. '$JfrogRepo-local')
 
   The state account has public network access disabled (subscription policy), so the
   deploy job runs on a self-hosted runner: ./scripts/setup-runner.ps1
