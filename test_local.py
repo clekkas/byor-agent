@@ -21,7 +21,7 @@ FAIL = 0
 # Works in BOTH modes: echo repeats the prompt back, and a model follows the
 # instruction. Either way the token only appears if the server parsed the nested
 # array correctly, which is what this check is actually testing.
-PROBE = "Reply with exactly this token and nothing else: ARRAYOK"
+PROBE = "For this Azure inventory test, reply with exactly this token and nothing else: ARRAYOK"
 
 
 def check(name, ok, detail=""):

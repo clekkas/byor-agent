@@ -140,3 +140,7 @@ The repo uses GitHub's ID-based ("immutable") OIDC subjects, so the credential c
 | `scripts/setup-runner.ps1` | Provisions and registers the self-hosted runner |
 | `scripts/generate-asset-inventory.ps1` | Generates this file |
 | `knowledge/` | Knowledge files bundled into the agent image |
+
+## Capital Cities 
+Greece = Athina 
+Thailand = Kuntep

@@ -34,7 +34,7 @@ Check "has output[] message" ($r -and $r.output[0].type -eq "message")
 
 Write-Host "`n[3] message-array input (the shape Foundry is most likely to send)"
 $r2 = PostJson "/responses" @{
-    input = @(@{ role = "user"; content = @(@{ type = "input_text"; text = "hello from the array shape" }) })
+    input = @(@{ role = "user"; content = @(@{ type = "input_text"; text = "hello from the Azure array shape" }) })
 }
 Check "array input accepted" ($r2 -and $r2.output_text -match "array shape")
 

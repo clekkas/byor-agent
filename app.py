@@ -124,7 +124,14 @@ SCOPE_EXCLUDED = {"agent", "model", "state", "main", "build", "deploy", "project
 def build_scope_terms(files: List[Path]) -> set:
     if not files:
         return set()
-    names = {n.lower() for f in files for n in re.findall(r"`([^`\n]+)`", f.read_text(encoding="utf-8"))}
+    names = set()
+    for file in files:
+        content = file.read_text(encoding="utf-8")
+        names.update(n.lower() for n in re.findall(r"`([^`\n]+)`", content))
+        names.update(
+            key.strip().lower()
+            for key in re.findall(r"(?m)^\s*([^#|=\n][^|=\n]*?)\s*=", content)
+        )
     return (names | SCOPE_WORDS) - SCOPE_EXCLUDED
 
 
@@ -137,8 +144,61 @@ def term_in(term: str, text: str) -> bool:
 
 SCOPE_TERMS = build_scope_terms(KNOWLEDGE_FILES)
 
+def build_capital_lookup(files: List[Path]) -> Dict[str, str]:
+    capitals: Dict[str, str] = {}
+    for file in files:
+        in_capital_section = False
+        content = file.read_text(encoding="utf-8")
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+
+            heading = re.fullmatch(r"#{1,6}\s+(.+?)\s*", line)
+            if heading:
+                in_capital_section = heading.group(1).casefold() == "capital cities"
+                continue
+            
+            if not in_capital_section or not line or "=" not in line: 
+                continue
+            country, city = (part.strip() for part in line.split("=", 1))
+            if not country or not city:
+                continue
+
+            normalized_country = country.casefold()
+            existing_city = capitals.get(normalized_country)
+            if existing_city is not None and existing_city != city:
+                raise ValueError(f"Conflicting city for country {country}: {existing_city} vs {city}")
+            capitals[normalized_country] = city
+
+    return capitals
+
+CAPITALS = build_capital_lookup(KNOWLEDGE_FILES)
+
+def answer_capital_question(prompt: str) -> Optional[str]:
+    normalized_prompt = prompt.casefold()
+
+    if re.search(r"\bcapital\b", normalized_prompt) is None:
+        return None
+
+    matches = [
+        (country,city)
+        for country,city in CAPITALS.items()
+        if term_in(country, normalized_prompt)
+    ]
+    if not matches:
+        return SCOPE_BLOCKED_REPLY
+
+    matches.sort(key=lambda item: len(item[0]), reverse=True)
+    return "\n".join(
+        f"The capital of {country.title()} is {city}."
+        for country, city in matches
+    )
 
 def answer(prompt: str) -> str:
+    capital_answer = answer_capital_question(prompt)
+    if capital_answer is not None:
+        print("scope_gate=capital_lookup", flush=True)
+        return capital_answer
+    
     in_scope = any(term_in(term, prompt.lower()) for term in SCOPE_TERMS)
     print(f"scope_gate={'pass' if in_scope else 'blocked'}", flush=True)
     if not in_scope:
