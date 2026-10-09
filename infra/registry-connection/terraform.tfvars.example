@@ -7,7 +7,7 @@ resource_group_name  = "<resource-group>"
 foundry_account_name = "<foundry-account-name>"
 foundry_project_name = "<foundry-project-name>"
 
-connection_name    = "private-registry" # must match registryConnectionId in azure.yaml
+connection_name    = "jfrog-registry"
 registry_target    = "https://yourtrial.jfrog.io"
 token_audience     = "<entra-app-client-id>"
 token_endpoint     = "/access/api/v1/oidc/token"

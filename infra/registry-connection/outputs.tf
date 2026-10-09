@@ -1,11 +1,16 @@
 output "registry_connection_id" {
-  description = "Full resource ID of the registry connection."
-  value       = azapi_resource.registry_connection.id
+  description = "Full resource ID of the active JFrog registry connection."
+  value       = azapi_resource.jfrog_registry.id
 }
 
 output "registry_connection_name" {
-  description = "Value to use for registryConnectionId in azure.yaml."
-  value       = azapi_resource.registry_connection.name
+  description = "Active connection name for hosted-agent deployments."
+  value       = azapi_resource.jfrog_registry.name
+}
+
+output "legacy_registry_connection_id" {
+  description = "Previous connection retained temporarily for rollback."
+  value       = azapi_resource.legacy_registry.id
 }
 
 output "project_id" {

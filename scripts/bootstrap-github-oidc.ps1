@@ -82,7 +82,7 @@ $tokenAudience = Get-TfVar token_audience
 $tokenEndpoint = Get-TfVar token_endpoint
 $registryOidcProvider = Get-TfVar oidc_provider_name
 $connectionName = Get-TfVar connection_name
-if (-not $connectionName) { $connectionName = 'private-registry' }
+if (-not $connectionName) { $connectionName = 'jfrog-registry' }
 if (-not $tokenEndpoint) { $tokenEndpoint = '/access/api/v1/oidc/token' }
 
 if (-not $JfrogRepo) {
@@ -214,7 +214,7 @@ $vars = [ordered]@{
     JF_URL                       = $jfUrl
     JFROG_REPO                   = $JfrogRepo
     JFROG_GITHUB_OIDC_PROVIDER   = $JfrogGithubOidcProvider
-    REGISTRY_CONNECTION_NAME     = $connectionName
+    JFROG_REGISTRY_CONNECTION_NAME = $connectionName
     REGISTRY_TOKEN_AUDIENCE      = $tokenAudience
     REGISTRY_TOKEN_ENDPOINT      = $tokenEndpoint
     REGISTRY_OIDC_PROVIDER_NAME  = $registryOidcProvider

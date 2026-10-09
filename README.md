@@ -50,7 +50,7 @@ Expected: a JSON envelope with `status: "completed"` and an `output_text` field.
 
 ### Registry connection (Terraform + AzAPI)
 
-The `private-registry` connection is managed by Terraform instead of `azd ai connection create`. It's the same `CustomKeys` connection (`type=registry_connection`, `mode=oauth_token_exchange`) with `audience`, `tokenEndpoint` and `body.provider_name` keys.
+The active `jfrog-registry` connection is managed by Terraform instead of `azd ai connection create`. It's a `CustomKeys` connection (`type=registry_connection`, `mode=oauth_token_exchange`) with `audience`, `tokenEndpoint` and `body.provider_name` keys. The previous `private-registry` connection is retained temporarily for rollback.
 
 ```bash
 cd infra/registry-connection
@@ -79,7 +79,7 @@ Changing the configured image creates a version under the existing `private-regi
 
 | File or asset | Purpose |
 |---|---|
-| `infra/registry-connection/` | Creates or imports the `private-registry` project connection used for JFrog OIDC token exchange. |
+| `infra/registry-connection/` | Retains the legacy `private-registry` connection and creates the active `jfrog-registry` connection used for JFrog OIDC token exchange. |
 | `infra/hosted-agent/` | Imports and manages `private-registry-agent`, its container definition, environment, protocol, and candidate versions. |
 | `infra/hosted-agent/main.tf` | Contains the data-plane import ID, agent definition, and `prevent_destroy` protection. |
 | `infra/hosted-agent/terraform.tfvars.example` | Documents the project endpoint, image, connection, and model inputs. |
@@ -88,7 +88,8 @@ Changing the configured image creates a version under the existing `private-regi
 | `.github/workflows/deploy-agent.yml` | Builds and pushes the image, applies both Terraform stacks, and validates the deployed candidate. |
 | `azure.yaml` | Legacy azd compatibility/reference only; it is not the deployment source of truth. |
 | `private-registry-agent` | Existing logical Foundry agent. Terraform imports it instead of recreating it. |
-| `private-registry` | Existing Foundry project connection through which Foundry obtains a short-lived JFrog pull token. |
+| `jfrog-registry` | Active Foundry project connection through which Foundry obtains a short-lived JFrog pull token. |
+| `private-registry` | Legacy connection retained temporarily for rollback; new agent versions don't reference it. |
 
 The stacks use separate remote-state keys:
 
@@ -175,7 +176,8 @@ The check fails if the version enters a failed state, becomes active with a diff
 - **Old versions are retained.** A new image creates a new version; it doesn't erase the previously active version.
 - **`@latest` controls the default.** The current endpoint routes 100% to `@latest`, so a newly active version becomes the default.
 - **Use immutable images.** CI uses a commit-specific `sha-<commit>` tag. A registry digest is stronger when available.
-- **Registry push and pull identities differ.** GitHub OIDC pushes the image; the Foundry project identity independently exchanges a token through `private-registry` to pull it.
+- **Registry push and pull identities differ.** GitHub OIDC pushes the image; the Foundry project identity independently exchanges a token through `jfrog-registry` to pull it.
+- **Legacy rollback connection.** `private-registry` is protected with `prevent_destroy` during the transition. Remove it only in a separate reviewed cleanup after the new connection is proven.
 - **A successful apply isn't readiness.** Always wait for the exact Terraform output version and verify that its image matches the intended release.
 - **Don't commit local inputs or state.** `terraform.tfvars`, `backend.hcl`, plans, `.terraform/`, and state files are ignored.
 - **The runner must be online.** If the deploy job remains queued, start `byor-ci-runner-01` and confirm GitHub reports the `byor-private` runner online.

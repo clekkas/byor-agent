@@ -82,6 +82,7 @@ $pipelineAppId = Get-RepoVar AZURE_CLIENT_ID
 $audienceAppId = Get-TfVar token_audience
 $registryTarget = Get-TfVar registry_target
 $registryOidc = Get-TfVar oidc_provider_name
+$connectionName = Get-TfVar connection_name
 $githubOidc = Get-RepoVar JFROG_GITHUB_OIDC_PROVIDER
 $jfrogRepo = Get-RepoVar JFROG_REPO
 $stateAccount = Get-RepoVar RS_STORAGE_ACCOUNT
@@ -207,7 +208,7 @@ $(ConvertTo-MdTable $deploymentRows @('Deployment', 'Model', 'Version', 'SKU'))
 
 $(ConvertTo-MdTable $connectionRows @('Connection', 'Category', 'Target', 'Metadata'))
 
-The ``private-registry`` connection is managed by **Terraform (AzAPI)** in ``infra/registry-connection``. It stores the OIDC token-exchange settings: Entra app audience, token endpoint ``/access/api/v1/oidc/token``, and JFrog provider name ``$registryOidc``.
+The ``$connectionName`` connection is managed by **Terraform (AzAPI)** in ``infra/registry-connection``. It stores the OIDC token-exchange settings: Entra app audience, token endpoint ``/access/api/v1/oidc/token``, and JFrog provider name ``$registryOidc``.
 
 ### Hosted agent ``$agentName``
 

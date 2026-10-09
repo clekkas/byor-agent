@@ -21,13 +21,46 @@ data "azapi_resource" "project" {
 }
 
 import {
-  for_each = var.import_existing_connection ? toset([var.connection_name]) : toset([])
-  to       = azapi_resource.registry_connection
+  for_each = var.import_existing_connection ? toset([var.legacy_connection_name]) : toset([])
+  to       = azapi_resource.legacy_registry
   id       = "${local.project_id}/connections/${each.value}"
 }
 
-# Same shape as `azd ai connection create --kind custom-keys ... --metadata type=registry_connection --metadata mode=oauth_token_exchange`.
-resource "azapi_resource" "registry_connection" {
+moved {
+  from = azapi_resource.registry_connection
+  to   = azapi_resource.legacy_registry
+}
+
+# Retain the previous connection while the new JFrog-specific name is validated.
+resource "azapi_resource" "legacy_registry" {
+  type      = "Microsoft.CognitiveServices/accounts/projects/connections@2025-06-01"
+  name      = var.legacy_connection_name
+  parent_id = data.azapi_resource.project.id
+
+  body = {
+    properties = {
+      category = "CustomKeys"
+      authType = "CustomKeys"
+      target   = var.registry_target
+      credentials = {
+        keys = local.registry_keys
+      }
+      metadata = {
+        type = "registry_connection"
+        mode = "oauth_token_exchange"
+      }
+    }
+  }
+
+  response_export_values = ["properties.target", "properties.metadata"]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# Active connection used by the hosted agent.
+resource "azapi_resource" "jfrog_registry" {
   type      = "Microsoft.CognitiveServices/accounts/projects/connections@2025-06-01"
   name      = var.connection_name
   parent_id = data.azapi_resource.project.id
@@ -48,4 +81,8 @@ resource "azapi_resource" "registry_connection" {
   }
 
   response_export_values = ["properties.target", "properties.metadata"]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }

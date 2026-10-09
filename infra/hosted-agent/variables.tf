@@ -27,7 +27,7 @@ variable "image_uri" {
 variable "registry_connection_name" {
   type        = string
   description = "Foundry project registry connection name or resource ID."
-  default     = "private-registry"
+  default     = "jfrog-registry"
 }
 
 variable "model_deployment_name" {

@@ -2,7 +2,7 @@ project_endpoint = "https://<account>.services.ai.azure.com/api/projects/<projec
 agent_name       = "private-registry-agent"
 image_uri        = "yourtrial.jfrog.io/foundry-agents/agent:sha-abcdef0"
 
-registry_connection_name = "private-registry"
+registry_connection_name = "jfrog-registry"
 model_deployment_name     = "gpt-5-mini"
 
 # Keep true while adopting an agent that was originally deployed by azd.

@@ -26,14 +26,15 @@ IDs (subscription, tenant, object and client IDs) are redacted. Secrets are neve
 
 | Connection | Category | Target | Metadata |
 |---|---|---|---|
-| `private-registry` | CustomKeys | https://trialndswdc.jfrog.io | mode=oauth_token_exchange, type=registry_connection |
+| `jfrog-registry` | CustomKeys | https://trialndswdc.jfrog.io | mode=oauth_token_exchange, type=registry_connection |
+| `private-registry` | CustomKeys | https://trialndswdc.jfrog.io | legacy rollback connection |
 
-The `private-registry` connection is managed by **Terraform (AzAPI)** in `infra/registry-connection`. It stores the OIDC token-exchange settings: Entra app audience, token endpoint `/access/api/v1/oidc/token`, and JFrog provider name `oidc-byor`.
+The active `jfrog-registry` connection is managed by **Terraform (AzAPI)** in `infra/registry-connection`. It stores the OIDC token-exchange settings: Entra app audience, token endpoint `/access/api/v1/oidc/token`, and JFrog provider name `oidc-byor`. The previous `private-registry` connection is retained temporarily for rollback.
 
 ### Hosted agent `private-registry-agent`
 
 - **Latest version**: 6 (active), protocol: responses 2.0.0
-- **Image**: `trialndswdc.jfrog.io/byor-demo-docker/agent:sha-2c36d2b` via registry connection `private-registry`
+- **Image**: `trialndswdc.jfrog.io/byor-demo-docker/agent:sha-2c36d2b`; new versions use `jfrog-registry`, while the recorded version used `private-registry`
 - **Agent identity**: platform-managed (blueprint `private-registry-agent-dd7ed`); it can call project models by default.
 
 | Version | Status | Created | Image | Resources | Env |
@@ -127,7 +128,7 @@ The repo uses GitHub's ID-based ("immutable") OIDC subjects, so the credential c
 
 ### Repository variables
 
-`AZURE_CLIENT_ID`, `AZURE_ENV_NAME`, `AZURE_LOCATION`, `AZURE_RESOURCE_GROUP`, `AZURE_SUBSCRIPTION_ID`, `AZURE_TENANT_ID`, `FOUNDRY_ACCOUNT_NAME`, `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_PROJECT_NAME`, `JF_URL`, `JFROG_GITHUB_OIDC_PROVIDER`, `JFROG_REPO`, `REGISTRY_CONNECTION_NAME`, `REGISTRY_IMPORT_EXISTING`, `REGISTRY_OIDC_PROVIDER_NAME`, `REGISTRY_TOKEN_AUDIENCE`, `REGISTRY_TOKEN_ENDPOINT`, `RS_CONTAINER_NAME`, `RS_RESOURCE_GROUP`, `RS_STORAGE_ACCOUNT`, `RUNNER_LABEL`, `RUNNER_LOCATION`, `TERRAFORM_VERSION`, `TF_STATE_KEY`
+`AZURE_CLIENT_ID`, `AZURE_ENV_NAME`, `AZURE_LOCATION`, `AZURE_RESOURCE_GROUP`, `AZURE_SUBSCRIPTION_ID`, `AZURE_TENANT_ID`, `FOUNDRY_ACCOUNT_NAME`, `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_PROJECT_NAME`, `JF_URL`, `JFROG_GITHUB_OIDC_PROVIDER`, `JFROG_REGISTRY_CONNECTION_NAME`, `JFROG_REPO`, `REGISTRY_IMPORT_EXISTING`, `REGISTRY_OIDC_PROVIDER_NAME`, `REGISTRY_TOKEN_AUDIENCE`, `REGISTRY_TOKEN_ENDPOINT`, `RS_CONTAINER_NAME`, `RS_RESOURCE_GROUP`, `RS_STORAGE_ACCOUNT`, `RUNNER_LABEL`, `RUNNER_LOCATION`, `TERRAFORM_VERSION`, `TF_STATE_KEY`
 
 ## Repository layout
 

@@ -25,7 +25,13 @@ variable "foundry_project_name" {
 }
 
 variable "connection_name" {
-  description = "Connection name. Must match registryConnectionId in azure.yaml."
+  description = "Active registry connection name used by hosted-agent deployments."
+  type        = string
+  default     = "jfrog-registry"
+}
+
+variable "legacy_connection_name" {
+  description = "Previous registry connection retained temporarily for rollback."
   type        = string
   default     = "private-registry"
 }
@@ -64,7 +70,7 @@ variable "extra_body_fields" {
 }
 
 variable "import_existing_connection" {
-  description = "Adopt a connection that already exists in Azure (e.g. one created with `azd ai connection create`) instead of creating it. No-op once it is in state."
+  description = "Adopt the legacy connection that existed before Terraform ownership. No-op once it is in state."
   type        = bool
   default     = false
 }

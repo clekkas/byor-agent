@@ -120,7 +120,7 @@ jobs:
       TF_VAR_resource_group_name: ${{ vars.AZURE_RESOURCE_GROUP }}
       TF_VAR_foundry_account_name: ${{ vars.FOUNDRY_ACCOUNT_NAME }}
       TF_VAR_foundry_project_name: ${{ vars.FOUNDRY_PROJECT_NAME }}
-      TF_VAR_connection_name: ${{ vars.REGISTRY_CONNECTION_NAME }}
+      TF_VAR_connection_name: ${{ vars.JFROG_REGISTRY_CONNECTION_NAME }}
       TF_VAR_registry_target: ${{ vars.JF_URL }}
       TF_VAR_token_audience: ${{ vars.REGISTRY_TOKEN_AUDIENCE }}
       TF_VAR_token_endpoint: ${{ vars.REGISTRY_TOKEN_ENDPOINT }}
@@ -129,7 +129,7 @@ jobs:
       TF_VAR_project_endpoint: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
       TF_VAR_agent_name: private-registry-agent
       TF_VAR_image_uri: ${{ needs.build.outputs.image }}
-      TF_VAR_registry_connection_name: ${{ vars.REGISTRY_CONNECTION_NAME }}
+      TF_VAR_registry_connection_name: ${{ vars.JFROG_REGISTRY_CONNECTION_NAME }}
       TF_VAR_model_deployment_name: gpt-5-mini
       TF_VAR_import_existing_agent: "true"
     steps:
