@@ -1,7 +1,7 @@
 name: Build and deploy hosted agent
 
-# Build -> push to JFrog (GitHub OIDC) -> terraform apply registry connection (Azure OIDC)
-# -> azd deploy hosted agent -> smoke test. No stored secrets; run
+# Build -> push to JFrog (GitHub OIDC) -> Terraform apply registry connection and
+# hosted-agent data-plane resource (Azure OIDC) -> REST smoke test. No stored secrets; run
 # scripts/bootstrap-github-oidc.ps1 once to create the identity and repo variables.
 
 on:
@@ -12,8 +12,8 @@ on:
       - knowledge/**
       - requirements*.txt
       - Dockerfile
-      - azure.yaml
       - infra/**
+      - scripts/test-hosted-agent.py
       - .github/workflows/deploy-agent.yml
   workflow_dispatch:
     inputs:
@@ -100,7 +100,7 @@ jobs:
         run: docker manifest inspect "${{ steps.meta.outputs.image }}" >/dev/null
 
   deploy:
-    name: Registry connection + agent deploy
+    name: Terraform agent deploy
     needs: build
     # Self-hosted runner inside the VNet: Terraform state is only reachable via private endpoint.
     runs-on: [self-hosted, linux, "${{ vars.RUNNER_LABEL }}"]
@@ -109,7 +109,6 @@ jobs:
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
-      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
       # Terraform azapi provider + azurerm backend authenticate with GitHub OIDC.
       ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
@@ -127,6 +126,12 @@ jobs:
       TF_VAR_token_endpoint: ${{ vars.REGISTRY_TOKEN_ENDPOINT }}
       TF_VAR_oidc_provider_name: ${{ vars.REGISTRY_OIDC_PROVIDER_NAME }}
       TF_VAR_import_existing_connection: ${{ vars.REGISTRY_IMPORT_EXISTING }}
+      TF_VAR_project_endpoint: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
+      TF_VAR_agent_name: private-registry-agent
+      TF_VAR_image_uri: ${{ needs.build.outputs.image }}
+      TF_VAR_registry_connection_name: ${{ vars.REGISTRY_CONNECTION_NAME }}
+      TF_VAR_model_deployment_name: gpt-5-mini
+      TF_VAR_import_existing_agent: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -155,53 +160,39 @@ jobs:
           terraform apply -input=false tfplan
           rm -f tfplan
 
-      # azd is preinstalled on the runner VM (infra/ci-runner/cloud-init.yaml).
-      - name: Check azd
-        run: azd version
-
-      - name: Install Foundry agents extension
-        run: azd extension install azure.ai.agents --no-prompt
-
-      - name: azd login (GitHub OIDC)
-        run: azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
-
-      - name: Configure azd environment
+      - name: Terraform init (hosted-agent state)
+        working-directory: infra/hosted-agent
         run: |
-          project_id="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${{ vars.AZURE_RESOURCE_GROUP }}/providers/Microsoft.CognitiveServices/accounts/${{ vars.FOUNDRY_ACCOUNT_NAME }}/projects/${{ vars.FOUNDRY_PROJECT_NAME }}"
-          azd env new "$AZURE_ENV_NAME" --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
-          azd env set AZURE_TENANT_ID "$AZURE_TENANT_ID"
-          azd env set AZURE_RESOURCE_GROUP "${{ vars.AZURE_RESOURCE_GROUP }}"
-          azd env set AZURE_AI_ACCOUNT_NAME "${{ vars.FOUNDRY_ACCOUNT_NAME }}"
-          azd env set AZURE_AI_PROJECT_NAME "${{ vars.FOUNDRY_PROJECT_NAME }}"
-          azd env set AZURE_AI_PROJECT_ID "$project_id"
-          azd env set FOUNDRY_PROJECT_ENDPOINT "${{ vars.FOUNDRY_PROJECT_ENDPOINT }}"
-          azd env set ENABLE_HOSTED_AGENTS true
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.RS_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.RS_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.RS_CONTAINER_NAME }}" \
+            -backend-config="key=hosted-agent/${AZURE_ENV_NAME}.tfstate" \
+            -backend-config="use_azuread_auth=true"
 
-      - name: Point azure.yaml at the built image
-        env:
-          IMAGE: ${{ needs.build.outputs.image }}
-          CONNECTION: ${{ vars.REGISTRY_CONNECTION_NAME }}
+      - name: Terraform plan (adopt agent and create candidate version)
+        working-directory: infra/hosted-agent
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply hosted agent
+        working-directory: infra/hosted-agent
         run: |
-          sed -i -E "s|^([[:space:]]*image:[[:space:]]*).*|\1\"${IMAGE}\"|" azure.yaml
-          grep -E "image:|registryConnectionId:" azure.yaml
-          grep -Eq "registryConnectionId:[[:space:]]*\"?${CONNECTION}\"?[[:space:]]*$" azure.yaml \
-            || { echo "::error::azure.yaml registryConnectionId does not match ${CONNECTION}"; exit 1; }
+          terraform apply -input=false tfplan
+          rm -f tfplan
 
-      - name: Deploy agent
-        run: azd deploy "$AGENT_SERVICE" --no-prompt
-
-      - name: Smoke test deployed agent
+      - name: Capture candidate version
+        id: agent
+        working-directory: infra/hosted-agent
         run: |
-          for i in 1 2 3; do
-            if azd ai agent invoke "$AGENT_SERVICE" "Respond with a short deployment confirmation." --no-prompt --output raw | tee /tmp/invoke.txt | grep -q "response.completed"; then
-              echo "Agent responded."; exit 0
-            fi
-            echo "Attempt $i failed; retrying in 30s"; sleep 30
-          done
-          cat /tmp/invoke.txt
-          exit 1
+          version="$(terraform output -raw agent_version)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Candidate version: $version"
 
-      # Persistent runner: don't leave credentials behind between jobs.
-      - name: Sign out
-        if: always()
-        run: azd auth logout || true
+      - name: Wait for and smoke test candidate
+        run: |
+          python3 scripts/test-hosted-agent.py \
+            --endpoint "$TF_VAR_project_endpoint" \
+            --agent "$TF_VAR_agent_name" \
+            --version "${{ steps.agent.outputs.version }}" \
+            --expected-image "$TF_VAR_image_uri"

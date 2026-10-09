@@ -7,7 +7,7 @@
     - Role assignments: Foundry Project Manager (project), Reader (resource group),
       Storage Blob Data Contributor (state storage) for the pipeline and for you
     - Storage account + container for remote Terraform state (Entra auth only, versioning on)
-    - infra/registry-connection/backend.hcl for local terraform runs (git-ignored)
+    - backend.hcl files for local registry-connection and hosted-agent Terraform runs
     - GitHub repository variables consumed by .github/workflows/deploy-agent.yml
 
   Azure values default to the active azd environment; registry values default to
@@ -38,6 +38,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $tfDir = Join-Path $root 'infra\registry-connection'
+$agentTfDir = Join-Path $root 'infra\hosted-agent'
 
 function Invoke-Az {
     $out = & az @args
@@ -182,6 +183,16 @@ key                  = "$stateKey"
 use_azuread_auth     = true
 "@ | Set-Content -Path (Join-Path $tfDir 'backend.hcl') -Encoding utf8
 Write-Host "==> Wrote infra/registry-connection/backend.hcl"
+
+$agentStateKey = "hosted-agent/$EnvName.tfstate"
+@"
+resource_group_name  = "$ResourceGroup"
+storage_account_name = "$StateStorageAccount"
+container_name       = "$StateContainer"
+key                  = "$agentStateKey"
+use_azuread_auth     = true
+"@ | Set-Content -Path (Join-Path $agentTfDir 'backend.hcl') -Encoding utf8
+Write-Host "==> Wrote infra/hosted-agent/backend.hcl"
 
 # ---- GitHub repository variables -------------------------------------------------
 Write-Host "==> GitHub variables on $Repo"

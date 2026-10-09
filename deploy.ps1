@@ -1,10 +1,9 @@
 <#
 .SYNOPSIS
-  Provision the Foundry registry connection with Terraform (AzAPI), then deploy the
-  hosted agent with azd, exactly as before.
+  Provision the Foundry registry connection and hosted agent with Terraform (AzAPI).
 
 .EXAMPLE
-  ./deploy.ps1                      # plan, prompt, apply, azd deploy
+  ./deploy.ps1                      # plan, prompt, apply both Terraform stacks
   ./deploy.ps1 -AutoApprove         # non-interactive
   ./deploy.ps1 -SkipAgentDeploy     # connection only
 #>
@@ -12,12 +11,16 @@
 param(
     [switch]$AutoApprove,
     [switch]$SkipAgentDeploy,
-    [string]$AgentService = 'private-registry-agent'
+    [string]$AgentService = 'private-registry-agent',
+    [string]$Image,
+    [string]$ProjectEndpoint,
+    [string]$ModelDeployment = 'gpt-5-mini'
 )
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $tfDir = Join-Path $root 'infra\registry-connection'
+$agentTfDir = Join-Path $root 'infra\hosted-agent'
 
 function Invoke-Checked {
     param([string]$Exe, [string[]]$Arguments)
@@ -31,7 +34,6 @@ if (-not (Test-Path (Join-Path $tfDir 'terraform.tfvars'))) {
 if (-not (Test-Path (Join-Path $tfDir 'backend.hcl'))) {
     throw "Missing $tfDir\backend.hcl (remote state). Run scripts/bootstrap-github-oidc.ps1 first."
 }
-
 Write-Host '==> Terraform: registry connection (AzAPI)'
 Invoke-Checked terraform @("-chdir=$tfDir", 'init', '-input=false', '-backend-config=backend.hcl')
 Invoke-Checked terraform @("-chdir=$tfDir", 'plan', '-input=false', '-out=tfplan')
@@ -54,10 +56,38 @@ if ($yaml -notmatch "registryConnectionId:\s*[`"']?$([regex]::Escape($connection
 
 if ($SkipAgentDeploy) { return }
 
-Write-Host "==> azd: deploying $AgentService"
-Push-Location $root
-try {
-    Invoke-Checked azd @('deploy', $AgentService, '--no-prompt')
-} finally {
-    Pop-Location
+if (-not (Test-Path (Join-Path $agentTfDir 'backend.hcl'))) {
+    throw "Missing $agentTfDir\backend.hcl (remote state). Run scripts/bootstrap-github-oidc.ps1 first."
 }
+
+if (-not $Image) {
+    $match = [regex]::Match($yaml, '(?m)^\s*image:\s*["'']?([^"''\s]+)')
+    if (-not $match.Success) { throw 'Unable to read the image from azure.yaml. Pass -Image explicitly.' }
+    $Image = $match.Groups[1].Value
+}
+if (-not $ProjectEndpoint) {
+    $match = [regex]::Match($yaml, '(?m)^\s*endpoint:\s*(https://\S+)')
+    if (-not $match.Success) { throw 'Unable to read the project endpoint from azure.yaml. Pass -ProjectEndpoint explicitly.' }
+    $ProjectEndpoint = $match.Groups[1].Value
+}
+
+Write-Host "==> Terraform: hosted agent $AgentService"
+Invoke-Checked terraform @("-chdir=$agentTfDir", 'init', '-input=false', '-backend-config=backend.hcl')
+Invoke-Checked terraform @(
+    "-chdir=$agentTfDir", 'plan', '-input=false', '-out=tfplan',
+    "-var=project_endpoint=$ProjectEndpoint",
+    "-var=agent_name=$AgentService",
+    "-var=image_uri=$Image",
+    "-var=registry_connection_name=$connectionName",
+    "-var=model_deployment_name=$ModelDeployment",
+    '-var=import_existing_agent=true'
+)
+if (-not $AutoApprove) {
+    $answer = Read-Host 'Apply the hosted-agent plan? (y/N)'
+    if ($answer -notmatch '^(y|yes)$') { Write-Host 'Aborted.'; exit 1 }
+}
+Invoke-Checked terraform @("-chdir=$agentTfDir", 'apply', '-input=false', 'tfplan')
+Remove-Item (Join-Path $agentTfDir 'tfplan') -ErrorAction SilentlyContinue
+
+$version = (& terraform "-chdir=$agentTfDir" output -raw agent_version)
+Write-Host "Hosted agent version: $version"

@@ -11,8 +11,9 @@ Minimal Foundry hosted agent image for the "bring your own registry" (JFrog + OI
 | `requirements.txt` | fastapi + uvicorn; openai + azure-identity only needed for model mode |
 | `build-and-push.sh` | Build → local smoke test → push to JFrog |
 | `infra/registry-connection/` | Terraform (AzAPI) for the Foundry project registry connection; remote state in Azure Storage |
-| `deploy.ps1` / `deploy.sh` | `terraform apply` the registry connection, then `azd deploy` the agent (needs network access to the state account) |
-| `.github/workflows/deploy-agent.yml` | CI/CD: build → push to JFrog → Terraform → `azd deploy` → smoke test |
+| `infra/hosted-agent/` | Terraform (AzAPI data plane) for the logical hosted agent; imports the existing agent and preserves its Foundry version history |
+| `deploy.ps1` / `deploy.sh` | Apply the registry-connection and hosted-agent Terraform stacks (needs network access to the state account) |
+| `.github/workflows/deploy-agent.yml` | CI/CD: build → push to JFrog → Terraform agent version → REST readiness and smoke test |
 | `scripts/bootstrap-github-oidc.ps1` | One-time: Entra app + GitHub OIDC credential, RBAC, state storage, repo variables |
 | `infra/ci-runner/` + `scripts/setup-runner.ps1` | Self-hosted runner VM in a VNet with a private endpoint to the state account |
 | `knowledge/azure-assets.md` + `scripts/generate-asset-inventory.ps1` | Generated asset inventory bundled into the agent as its knowledge base |
@@ -65,36 +66,128 @@ terraform apply
 - If the connection already exists, set `import_existing_connection = true` and the first apply adopts it. The first apply after import shows an in-place update because ARM never returns connection credentials; it re-sends the same keys.
 - Output `project_principal_id` is the identity to bind in the JFrog OIDC identity mapping.
 
-### Agent
+## Hosted-agent deployment with Terraform and AzAPI
 
-Deploy the agent with azd as before (the connection is no longer created by azd):
+This repository deploys the Foundry hosted agent without `azd deploy`. Terraform manages two API surfaces:
 
-```bash
-azd deploy private-registry-agent
+1. The JFrog registry connection is an ARM control-plane resource managed by `azapi_resource`.
+2. The logical hosted agent is a Foundry data-plane resource managed by `azapi_data_plane_resource` with type `Microsoft.Foundry/agents@v1`.
+
+Changing the configured image creates a version under the existing `private-registry-agent`; it doesn't replace the logical agent. The existing `@latest` endpoint selector makes the newest active version the default while older versions remain in Foundry history.
+
+### Important files and assets
+
+| File or asset | Purpose |
+|---|---|
+| `infra/registry-connection/` | Creates or imports the `private-registry` project connection used for JFrog OIDC token exchange. |
+| `infra/hosted-agent/` | Imports and manages `private-registry-agent`, its container definition, environment, protocol, and candidate versions. |
+| `infra/hosted-agent/main.tf` | Contains the data-plane import ID, agent definition, and `prevent_destroy` protection. |
+| `infra/hosted-agent/terraform.tfvars.example` | Documents the project endpoint, image, connection, and model inputs. |
+| `scripts/test-hosted-agent.py` | Waits for one exact version to become active, verifies its image, and invokes its Responses endpoint. |
+| `deploy.ps1` / `deploy.sh` | Manually plans and applies the registry and hosted-agent stacks in order. |
+| `.github/workflows/deploy-agent.yml` | Builds and pushes the image, applies both Terraform stacks, and validates the deployed candidate. |
+| `azure.yaml` | Legacy azd compatibility/reference only; it is not the deployment source of truth. |
+| `private-registry-agent` | Existing logical Foundry agent. Terraform imports it instead of recreating it. |
+| `private-registry` | Existing Foundry project connection through which Foundry obtains a short-lived JFrog pull token. |
+
+The stacks use separate remote-state keys:
+
+```text
+registry-connection/<environment>.tfstate
+hosted-agent/<environment>.tfstate
 ```
 
-Or run both steps with `./deploy.ps1` (`-AutoApprove`, `-SkipAgentDeploy`) or `./deploy.sh` (`AUTO_APPROVE=1`, `SKIP_AGENT_DEPLOY=1`).
+Both states are in the existing Azure Storage container. In this environment the account is private, so Terraform must run from a network with access to its private endpoint, normally the self-hosted GitHub runner.
 
-For a new agent, generate `azure.yaml` with:
+### Manual deployment
 
-```bash
-azd ai agent init --no-prompt \
-  --agent-name private-registry-agent \
-  --image yourtrial.jfrog.io/foundry-agents/agent:0.1 \
-  --project-id "$PROJECT_ID" \
-  --registry-connection private-registry
+Prerequisites:
+
+- The `linux/amd64` image has already been pushed to JFrog.
+- Azure CLI is signed in to the correct tenant and subscription.
+- Terraform 1.7 or later and AzAPI 2.13 are available.
+- `infra/registry-connection/terraform.tfvars` contains the registry connection inputs.
+- Both `backend.hcl` files exist. Run `.\scripts\bootstrap-github-oidc.ps1` once to generate them.
+- The machine can reach the private Terraform state endpoint.
+
+The recommended PowerShell command applies both stacks:
+
+```powershell
+.\deploy.ps1 `
+  -Image "trialndswdc.jfrog.io/byor-demo-docker/agent:sha-abcdef0"
 ```
 
-Keep `docker.imagePassthrough: true` and `registryConnectionId: private-registry` in the generated `azure.yaml`, and leave the existing connection out of the `uses` list.
+Review both plans when prompted. For an unattended deployment:
+
+```powershell
+.\deploy.ps1 `
+  -Image "trialndswdc.jfrog.io/byor-demo-docker/agent:sha-abcdef0" `
+  -AutoApprove
+```
+
+The Bash equivalent is:
+
+```bash
+IMAGE="trialndswdc.jfrog.io/byor-demo-docker/agent:sha-abcdef0" \
+  ./deploy.sh
+```
+
+To run the stacks directly:
+
+```bash
+terraform -chdir=infra/registry-connection init -backend-config=backend.hcl
+terraform -chdir=infra/registry-connection plan -out=tfplan
+terraform -chdir=infra/registry-connection apply tfplan
+
+terraform -chdir=infra/hosted-agent init -backend-config=backend.hcl
+terraform -chdir=infra/hosted-agent plan -out=tfplan
+terraform -chdir=infra/hosted-agent apply tfplan
+terraform -chdir=infra/hosted-agent output -raw agent_version
+```
+
+For the first hosted-agent apply, keep `import_existing_agent = true`. Terraform imports the existing logical agent into the new state before writing the requested definition. The import block is idempotent after adoption.
+
+### Manual deployed-agent validation
+
+After apply, acquire a Foundry data-plane token and run the same validation used by CI:
+
+```powershell
+$env:AZURE_AI_ACCESS_TOKEN = az account get-access-token `
+  --resource https://ai.azure.com `
+  --query accessToken `
+  --output tsv
+
+$version = terraform -chdir=infra\hosted-agent output -raw agent_version
+
+python scripts\test-hosted-agent.py `
+  --endpoint "https://<account>.services.ai.azure.com/api/projects/<project>" `
+  --agent "private-registry-agent" `
+  --version $version `
+  --expected-image "trialndswdc.jfrog.io/byor-demo-docker/agent:sha-abcdef0"
+```
+
+The check fails if the version enters a failed state, becomes active with a different image, times out, or doesn't return a completed Responses payload.
+
+### Gotchas
+
+- **Use one deployment owner.** After Terraform adopts the agent, don't use `azd deploy` or make unmanaged portal/SDK definition changes to the same agent.
+- **Review the first plan carefully.** It should import and update in place with no destroy. `prevent_destroy = true` provides an additional guard.
+- **Old versions are retained.** A new image creates a new version; it doesn't erase the previously active version.
+- **`@latest` controls the default.** The current endpoint routes 100% to `@latest`, so a newly active version becomes the default.
+- **Use immutable images.** CI uses a commit-specific `sha-<commit>` tag. A registry digest is stronger when available.
+- **Registry push and pull identities differ.** GitHub OIDC pushes the image; the Foundry project identity independently exchanges a token through `private-registry` to pull it.
+- **A successful apply isn't readiness.** Always wait for the exact Terraform output version and verify that its image matches the intended release.
+- **Don't commit local inputs or state.** `terraform.tfvars`, `backend.hcl`, plans, `.terraform/`, and state files are ignored.
+- **The runner must be online.** If the deploy job remains queued, start `byor-ci-runner-01` and confirm GitHub reports the `byor-private` runner online.
 
 ## CI/CD (GitHub Actions)
 
-`.github/workflows/deploy-agent.yml` runs on push to `main` (app, Dockerfile, `azure.yaml`, `infra/**`) and on manual dispatch. No secrets are stored; every login uses OIDC.
+`.github/workflows/deploy-agent.yml` runs on push to `main` for agent code, knowledge, dependencies, the Dockerfile, Terraform, the deployed-agent test, or the workflow itself. It also supports manual dispatch. No secrets are stored; every login uses OIDC.
 
 | Job | Runner | Steps |
 |---|---|---|
 | `build` | `ubuntu-latest` | JFrog login (GitHub OIDC) → `docker build` linux/amd64 → container smoke test (`/readiness`, `/liveness`, `POST /responses`) → push `agent:sha-<commit>` |
-| `deploy` | self-hosted (`byor-private`) | Azure login (GitHub OIDC) → `terraform apply` registry connection (remote state) → `azd deploy` with the new image → `azd ai agent invoke` smoke test |
+| `deploy` | self-hosted (`byor-private`) | Azure OIDC → Terraform registry connection → import/update the Foundry data-plane agent → wait for the exact candidate version → invoke its Responses endpoint |
 
 Manual dispatch accepts `image_tag` to redeploy an existing image without building.
 
@@ -110,7 +203,8 @@ Manual dispatch accepts `image_tag` to redeploy an existing image without buildi
 
 - **Why a self-hosted runner:** a subscription policy forces `publicNetworkAccess=Disabled` on storage accounts, so GitHub-hosted runners can't reach Terraform state.
 - **Runner outbound access:** the subscription can't create public IPs, so the runner subnet uses Azure default outbound access instead of a NAT gateway.
-- **Image tag:** the workflow rewrites the `image:` line in `azure.yaml` on the runner only. The committed tag is just the local default.
+- **Agent ownership:** `infra/hosted-agent` is the deployment source of truth. The workflow passes its commit-specific JFrog image directly as `TF_VAR_image_uri`.
+- **Separate state:** the registry connection uses `registry-connection/<environment>.tfstate`; the hosted agent uses `hosted-agent/<environment>.tfstate`.
 
 ## Caveats
 

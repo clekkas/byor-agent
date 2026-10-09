@@ -191,7 +191,7 @@ IDs (subscription, tenant, object and client IDs) are redacted. Secrets are neve
 - **Project**: a Microsoft Foundry hosted agent (``$agentName``) whose container image is stored in **JFrog Artifactory**, not Azure Container Registry ("bring your own registry").
 - **Image pull**: Foundry pulls the image using **OIDC token exchange**. The Foundry project's managed identity exchanges an Entra token for a short-lived JFrog token, so no registry password is stored.
 - **Model**: the agent answers with model **``$($latest.definition.environment_variables.AZURE_AI_MODEL_DEPLOYMENT_NAME)``** through the Foundry project endpoint, using its own platform-managed identity.
-- **CI/CD**: GitHub Actions builds the image, pushes it to JFrog (GitHub OIDC), applies Terraform for the registry connection, and deploys the agent with ``azd``. All logins use OIDC; no secrets are stored.
+- **CI/CD**: GitHub Actions builds the image, pushes it to JFrog (GitHub OIDC), and applies Terraform for both the registry connection and hosted agent. The agent is managed through the Foundry data plane with AzAPI. All authentication uses OIDC; no secrets are stored.
 - **Azure location**: resource group ``$resourceGroup``, Foundry in **$location**, CI runner in **$runnerLocation**. azd environment: ``$envName``.
 
 ## Foundry
@@ -224,6 +224,7 @@ $(ConvertTo-MdTable $resourceRows @('Name', 'Type', 'Region', 'Origin'))
 ### Terraform state
 
 - **Registry connection** (``infra/registry-connection``): remote state in storage account ``$stateAccount``, container ``$stateContainer``, key ``$stateKey``. Entra auth only. Public network access is **disabled by subscription policy**, so state is reachable only through the private endpoint from the CI runner VNet.
+- **Hosted agent** (``infra/hosted-agent``): separate remote state in the same account and container, key ``hosted-agent/$envName.tfstate``. It imports the existing logical agent, preserves Foundry version history, and prevents destroy.
 - **CI runner** (``infra/ci-runner``): local state on the operator's machine.
 
 ### CI runner network
@@ -278,8 +279,9 @@ $(($varNames | ForEach-Object { "``$_``" }) -join ', ')
 | Path | Purpose |
 |---|---|
 | ``app.py`` | FastAPI Responses-protocol agent (echo or model mode); serves ``/responses``, ``/readiness``, ``/liveness`` |
-| ``azure.yaml`` | azd service definition (image, registry connection, env) |
+| ``azure.yaml`` | Legacy azd compatibility/reference definition; not the CI/CD source of truth |
 | ``infra/registry-connection/`` | Terraform (AzAPI) for the Foundry registry connection |
+| ``infra/hosted-agent/`` | Terraform (AzAPI data plane) for the logical hosted agent and versions |
 | ``infra/ci-runner/`` | Terraform (AzAPI) for the runner VNet, private endpoint and VM |
 | ``scripts/bootstrap-github-oidc.ps1`` | Entra app, federated credential, RBAC, state storage, GitHub variables |
 | ``scripts/setup-runner.ps1`` | Provisions and registers the self-hosted runner |

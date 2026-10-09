@@ -1,0 +1,10 @@
+project_endpoint = "https://<account>.services.ai.azure.com/api/projects/<project>"
+agent_name       = "private-registry-agent"
+image_uri        = "yourtrial.jfrog.io/foundry-agents/agent:sha-abcdef0"
+
+registry_connection_name = "private-registry"
+model_deployment_name     = "gpt-5-mini"
+
+# Keep true while adopting an agent that was originally deployed by azd.
+# Import blocks are idempotent after the resource is present in state.
+import_existing_agent = true
