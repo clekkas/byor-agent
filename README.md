@@ -166,7 +166,7 @@ The check fails if the version enters a failed state, becomes active with a diff
 
 ## CI/CD (GitHub Actions)
 
-One workflow, `deploy-agent.yml`, supports manual dispatch, and every external login uses OIDC rather than a stored cloud or registry credential. Both jobs run in the protected `agent` GitHub Environment (required reviewers, `main` only).
+One workflow, `deploy-agent.yml`, supports manual dispatch, and every external login uses OIDC rather than a stored cloud or registry credential. Both jobs run in the protected `agent` GitHub Environment (`main` only; required reviewers when the GitHub plan supports them).
 
 | Job | Runner | Steps |
 |---|---|---|
@@ -187,10 +187,12 @@ It runs for application and `infra/hosted-agent/` changes. Manual dispatch accep
      -Reviewers <user>,<org>/<team>
    ```
 
+   On a GitHub plan that rejects required reviewers for private repos (HTTP 422 "billing plan"), pass `-NoRequiredReviewers` instead of `-Reviewers`. The `main`-only branch policy still applies, but a push to `main` then builds and deploys with no approval; re-run with `-Reviewers` once your plan supports it.
+
    It verifies the contract's `valuesSha256` (equivalent to `jq -S -c .values foundry-<env>.json | sha256sum`) before writing anything, then:
    - creates the agent Entra app with a federated credential for subject `repo:<owner>/<repo>:environment:agent` (ID-based subject prefixes are handled);
    - creates the `agent-tfstate` container and grants the agent identity `Storage Blob Data Contributor` on it only, `Foundry Project Manager` on the project and `Reader` on the resource group;
-   - creates the `agent` environment with required reviewers and a `main`-only branch policy, reads it back, and fails if either is missing;
+   - creates the `agent` environment with required reviewers (unless `-NoRequiredReviewers`) and a `main`-only branch policy, reads it back, and fails if either is missing;
    - copies the contract values and the app-owned variables (`AGENT_AZURE_CLIENT_ID`, `AGENT_STATE_RESOURCE_GROUP`, `AGENT_STATE_STORAGE_ACCOUNT`, `AGENT_STATE_CONTAINER`, `AGENT_STATE_KEY`, `MODEL_DEPLOYMENT_NAME`, `SUPPORTED_AGENT_SKUS`, optional `RAI_POLICY_ID`) into the `agent` environment, and sets repository variables `RUNNER_LABEL` and `TERRAFORM_VERSION`;
    - writes `infra/hosted-agent/backend.hcl` (git-ignored).
 

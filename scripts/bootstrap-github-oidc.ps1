@@ -24,6 +24,10 @@
   ./scripts/bootstrap-github-oidc.ps1 -Repo contoso/agent-repo `
     -ContractFile .\foundry-dev.json -StateStorageAccount tfstateb173d2d85c34 `
     -Reviewers alice,contoso/agent-approvers
+
+  # GitHub plan without required reviewers on private repos (no approval gate on the deploy job):
+  ./scripts/bootstrap-github-oidc.ps1 -Repo contoso/agent-repo `
+    -ContractFile .\foundry-dev.json -StateStorageAccount tfstateb173d2d85c34 -NoRequiredReviewers
 #>
 [CmdletBinding()]
 param(
@@ -36,8 +40,10 @@ param(
     [string]$StateContainer = 'agent-tfstate',
     [string]$EnvName,
     [string]$AppName = 'github-byor-agent-deployer',
-    # GitHub users and/or org/team-slug required to approve deployments. Mandatory (unless -SkipGitHub).
+    # GitHub users and/or org/team-slug required to approve deployments. Mandatory unless -NoRequiredReviewers or -SkipGitHub.
     [string[]]$Reviewers = @(),
+    # For GitHub plans that reject required reviewers on private repos (HTTP 422). Leaves the deploy job without an approval gate.
+    [switch]$NoRequiredReviewers,
     [switch]$PreventSelfReview,
     [string]$ModelDeploymentName = 'gpt-5-mini',
     [string]$SupportedAgentSkus = '0.5:1Gi,1:2Gi,2:4Gi',
@@ -88,14 +94,16 @@ function Get-ValuesSha256([psobject]$Values) {
         $sb.ToString()
     }
     $json = '{' + (($names | ForEach-Object { (Format-JsonString $_) + ':' + (Format-JsonString ([string]$Values.$_)) }) -join ',') + '}'
-    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+    # The platform hashes `jq -S -c .values | sha256sum`, so the hashed text ends with a newline.
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json + "`n")
     [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '').ToLower()
 }
 
 # ---- Guards that must hold before anything is created ---------------------------------------
-if (-not $SkipGitHub -and $Reviewers.Count -eq 0) {
-    throw "-Reviewers is required (GitHub users and/or org/team-slug). The '$agentEnv' environment must have required reviewers, and re-running this script without them would clear any set earlier."
+if (-not $SkipGitHub -and -not $NoRequiredReviewers -and $Reviewers.Count -eq 0) {
+    throw "-Reviewers is required (GitHub users and/or org/team-slug), or pass -NoRequiredReviewers explicitly. Re-running this script without either would clear any reviewers set earlier."
 }
+if ($NoRequiredReviewers -and $Reviewers.Count -gt 0) { throw '-Reviewers and -NoRequiredReviewers are mutually exclusive.' }
 $visibility = (& gh repo view $Repo --json visibility --jq .visibility 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $visibility) { throw "Cannot read repository '$Repo' with gh. Run 'gh auth login' with admin access to the repo." }
 if ($visibility -notin 'PRIVATE', 'INTERNAL') {
@@ -235,10 +243,11 @@ function Set-GitHubVariable([string]$Name, [string]$Value, [string]$Environment)
 
 if (-not $SkipGitHub) {
     Write-Host "==> GitHub environment '$agentEnv'"
-    $body = @{
-        deployment_branch_policy = @{ protected_branches = $false; custom_branch_policies = $true }
-        reviewers                = @($Reviewers | ForEach-Object { Resolve-Reviewer $_ })
-        prevent_self_review      = [bool]$PreventSelfReview
+    $body = @{ deployment_branch_policy = @{ protected_branches = $false; custom_branch_policies = $true } }
+    # An empty reviewers array is rejected on plans without required reviewers (HTTP 422), so omit the key.
+    if (-not $NoRequiredReviewers) {
+        $body.reviewers = @($Reviewers | ForEach-Object { Resolve-Reviewer $_ })
+        $body.prevent_self_review = [bool]$PreventSelfReview
     }
     $body | ConvertTo-Json -Depth 5 | & gh api -X PUT "repos/$Repo/environments/$agentEnv" --input - | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Could not create environment $agentEnv (required reviewers need a GitHub plan that supports them on this repo)" }
@@ -251,7 +260,8 @@ if (-not $SkipGitHub) {
     # Read back: fail loudly rather than leave the deploy identity reachable without approval.
     $envInfo = & gh api "repos/$Repo/environments/$agentEnv" | ConvertFrom-Json
     $reviewerCount = @($envInfo.protection_rules | Where-Object type -eq 'required_reviewers' | ForEach-Object { $_.reviewers }).Count
-    if ($reviewerCount -lt 1) { throw "Environment '$agentEnv' has no required reviewers after configuration." }
+    if ($NoRequiredReviewers) { Write-Warning "Environment '$agentEnv' has NO required reviewers (-NoRequiredReviewers): a push to main that triggers the deploy workflow builds and deploys without approval. Re-run with -Reviewers to restore the gate." }
+    elseif ($reviewerCount -lt 1) { throw "Environment '$agentEnv' has no required reviewers after configuration." }
     if (-not $envInfo.deployment_branch_policy.custom_branch_policies) { throw "Environment '$agentEnv' is not restricted to custom deployment branches." }
     $branches = & gh api "repos/$Repo/environments/$agentEnv/deployment-branch-policies" --jq '[.branch_policies[].name] | join(",")'
     Write-Host "  verified: $reviewerCount required reviewer(s); deployment branches: $branches"
@@ -299,5 +309,5 @@ Remaining manual steps:
        Token scope : Read + Deploy/Cache on the repo behind '$($v.JFROG_REPO)'
   2. Runner and state private endpoint are platform-owned: confirm the runner labelled '$RunnerLabel' is online for this repo
      (see the foundation repo README). This repo does not provision it.
-  3. Approvers for '$agentEnv' will see one approval prompt per job that uses the environment (build and deploy).
+  3. $(if ($NoRequiredReviewers) { "'$agentEnv' has NO approval gate (-NoRequiredReviewers). Re-run with -Reviewers once your plan supports it." } else { "Approvers for '$agentEnv' will see one approval prompt per job that uses the environment (build and deploy)." })
 "@
