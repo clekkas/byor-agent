@@ -1,0 +1,101 @@
+name: Plan hosted agent (no apply)
+
+# Manual, read-only: runs `terraform plan` for infra/hosted-agent on the self-hosted runner, where
+# the private Terraform state is reachable. It never applies. Use it to review the plan (for example
+# the first import of the existing agent into agent-tfstate) before running deploy-agent.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_uri:
+        description: Immutable image digest URI to plan with (leave empty to use the live agent's current image)
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: hosted-agent-deployment
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Terraform plan only
+    environment: agent
+    runs-on: [self-hosted, linux, "${{ vars.RUNNER_LABEL }}"]
+    env:
+      ARM_CLIENT_ID: ${{ vars.AGENT_AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_project_endpoint: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
+      TF_VAR_agent_name: private-registry-agent
+      TF_VAR_registry_connection_name: ${{ vars.JFROG_REGISTRY_CONNECTION_NAME }}
+      TF_VAR_model_deployment_name: ${{ vars.MODEL_DEPLOYMENT_NAME }}
+      TF_VAR_cpu: ${{ vars.AGENT_CPU || '0.5' }}
+      TF_VAR_memory: ${{ vars.AGENT_MEMORY || '1Gi' }}
+      TF_VAR_import_existing_agent: "true"
+      STATE_RESOURCE_GROUP: ${{ vars.AGENT_STATE_RESOURCE_GROUP }}
+      STATE_STORAGE_ACCOUNT: ${{ vars.AGENT_STATE_STORAGE_ACCOUNT }}
+      STATE_CONTAINER: ${{ vars.AGENT_STATE_CONTAINER }}
+      STATE_KEY: ${{ vars.AGENT_STATE_KEY }}
+      INPUT_IMAGE_URI: ${{ inputs.image_uri }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AGENT_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve image to plan with
+        run: |
+          image="$INPUT_IMAGE_URI"
+          if [ -z "$image" ]; then
+            body="$(az rest --method get --resource https://ai.azure.com \
+              --url "${TF_VAR_project_endpoint}/agents/${TF_VAR_agent_name}?api-version=v1")"
+            image="$(printf '%s' "$body" | python3 -c '
+          import json, re, sys
+          raw = sys.stdin.read()
+          try:
+              latest = json.loads(raw)["versions"]["latest"]
+              found = latest["definition"]["container_configuration"]["image"]
+          except Exception:
+              m = re.search(r"[^\"/\s]+/[^\"\s]+@sha256:[0-9a-f]{64}", raw)
+              found = m.group(0) if m else ""
+          print(found)
+          ')"
+          fi
+          case "$image" in
+            *@sha256:????????????????????????????????????????????????????????????????) ;;
+            *)
+              echo "::error::Could not resolve an image digest URI. Re-run with the image_uri input."
+              exit 1
+              ;;
+          esac
+          echo "Planning with image: $image"
+          echo "TF_VAR_image_uri=$image" >> "$GITHUB_ENV"
+
+      - name: Terraform init (hosted-agent state)
+        working-directory: infra/hosted-agent
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${STATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${STATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${STATE_CONTAINER}" \
+            -backend-config="key=${STATE_KEY}" \
+            -backend-config="use_azuread_auth=true"
+
+      - name: Terraform plan (read-only)
+        working-directory: infra/hosted-agent
+        run: terraform plan -input=false -lock-timeout=60s
