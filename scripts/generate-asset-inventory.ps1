@@ -1,8 +1,12 @@
 <#
 .SYNOPSIS
   Generate knowledge/azure-assets.md: an inventory of every asset used by this project,
-  built from live data (az, azd, gh, terraform). The agent bundles this file and uses it
-  to answer questions about the project.
+  built from live data (az, gh). The agent bundles this file and uses it to answer
+  questions about the project.
+
+  Platform facts (registry target, connection name, token audience, ...) are read from the
+  variables of the `agent` GitHub Environment, i.e. the copy of the foundation contract.
+  Foundation Terraform state and foundation tfvars are never read.
 
   - Never reads connection secrets (no listsecrets calls).
   - Redacts IDs: every GUID in the output is replaced with <redacted>, and scopes are shown
@@ -27,16 +31,9 @@ function Invoke-Json {
     $out | ConvertFrom-Json
 }
 
-function Get-RepoVar([string]$Name) {
-    $v = & gh variable get $Name --repo $Repo 2>$null
+function Get-AgentVar([string]$Name) {
+    $v = & gh variable get $Name --repo $Repo --env agent 2>$null
     if ($LASTEXITCODE -eq 0) { $v.Trim() } else { $null }
-}
-
-function Get-TfVar([string]$Name) {
-    $file = Join-Path $root 'infra\registry-connection\terraform.tfvars'
-    if (-not (Test-Path $file)) { return $null }
-    $m = Select-String -Path $file -Pattern "^\s*$Name\s*=\s*`"([^`"]*)`"" | Select-Object -First 1
-    if ($m) { $m.Matches[0].Groups[1].Value } else { $null }
 }
 
 # /subscriptions/<id>/resourceGroups/rg/providers/Microsoft.X/type/name/... -> "rg / type name / ..."
@@ -63,43 +60,40 @@ function ConvertTo-MdTable([object[]]$Rows, [string[]]$Columns) {
 }
 
 # ---- Inputs --------------------------------------------------------------------------
-Push-Location $root
-try {
-    $subscriptionId = (& azd env get-value AZURE_SUBSCRIPTION_ID).Trim()
-    $resourceGroup = (& azd env get-value AZURE_RESOURCE_GROUP).Trim()
-    $account = (& azd env get-value AZURE_AI_ACCOUNT_NAME).Trim()
-    $project = (& azd env get-value AZURE_AI_PROJECT_NAME).Trim()
-    $location = (& azd env get-value AZURE_LOCATION).Trim()
-    $envName = (& azd env get-value AZURE_ENV_NAME).Trim()
-} finally { Pop-Location }
+$subscriptionId = Get-AgentVar AZURE_SUBSCRIPTION_ID
+$resourceGroup = Get-AgentVar AZURE_RESOURCE_GROUP
+$account = Get-AgentVar FOUNDRY_ACCOUNT_NAME
+$project = Get-AgentVar FOUNDRY_PROJECT_NAME
+$missingVars = @{ AZURE_SUBSCRIPTION_ID = $subscriptionId; AZURE_RESOURCE_GROUP = $resourceGroup; FOUNDRY_ACCOUNT_NAME = $account; FOUNDRY_PROJECT_NAME = $project }.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object Key
+if ($missingVars) { throw "Missing variables in the '$Repo' agent environment: $($missingVars -join ', '). Load the platform contract with scripts/bootstrap-github-oidc.ps1 -ContractFile." }
+$location = (& az group show -n $resourceGroup --subscription $subscriptionId --query location -o tsv 2>$null)
 
 $rgId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup"
 $accountId = "$rgId/providers/Microsoft.CognitiveServices/accounts/$account"
 $projectId = "$accountId/projects/$project"
 $projectEndpoint = "https://$account.services.ai.azure.com/api/projects/$project"
 $agentName = (Select-String -Path (Join-Path $root 'azure.yaml') -Pattern '^\s*name:\s*(\S+)\s*$' | Select-Object -Last 1).Matches[0].Groups[1].Value
-$pipelineAppId = Get-RepoVar AZURE_CLIENT_ID
-$audienceAppId = Get-TfVar token_audience
-$registryTarget = Get-TfVar registry_target
-$registryOidc = Get-TfVar oidc_provider_name
-$connectionName = Get-TfVar connection_name
-$githubOidc = Get-RepoVar JFROG_GITHUB_OIDC_PROVIDER
-$jfrogRepo = Get-RepoVar JFROG_REPO
-$stateAccount = Get-RepoVar RS_STORAGE_ACCOUNT
-$stateContainer = Get-RepoVar RS_CONTAINER_NAME
-$stateKey = Get-RepoVar TF_STATE_KEY
-$runnerLocation = Get-RepoVar RUNNER_LOCATION
+$pipelineAppId = Get-AgentVar AGENT_AZURE_CLIENT_ID
+$audienceAppId = Get-AgentVar REGISTRY_TOKEN_AUDIENCE
+$registryTarget = Get-AgentVar JF_URL
+$registryOidc = Get-AgentVar REGISTRY_OIDC_PROVIDER_NAME
+$connectionName = Get-AgentVar JFROG_REGISTRY_CONNECTION_NAME
+$githubOidc = Get-AgentVar JFROG_GITHUB_OIDC_PROVIDER
+$jfrogRepo = Get-AgentVar JFROG_REPO
+$stateAccount = Get-AgentVar AGENT_STATE_STORAGE_ACCOUNT
+$stateContainer = Get-AgentVar AGENT_STATE_CONTAINER
+$stateKey = Get-AgentVar AGENT_STATE_KEY
 
 Write-Host '==> Collecting Azure resources'
 $resources = Invoke-Json resource list -g $resourceGroup
 $resourceRows = $resources | Sort-Object type, name | ForEach-Object {
     $res = $_
     $origin = switch ($res.tags.purpose) {
-        'github-actions-runner' { 'Created: CI runner (infra/ci-runner)' }
-        'terraform-state' { 'Created: Terraform state (bootstrap script)' }
+        'github-actions-runner' { 'Platform: CI runner (foundation repo)' }
+        'terraform-state' { 'Platform: Terraform state (foundation repo)' }
         default {
-            if ($res.type -like 'Microsoft.CognitiveServices/*') { 'Pre-existing: Foundry' }
-            elseif ($res.name -like 'byor-ci*') { 'Created: CI runner (infra/ci-runner)' }
+            if ($res.type -like 'Microsoft.CognitiveServices/*') { 'Platform: Foundry' }
+            elseif ($res.name -like 'byor-ci*') { 'Platform: CI runner (foundation repo)' }
             else { 'Other' }
         }
     }
@@ -139,7 +133,7 @@ Write-Host '==> Collecting Entra apps and role assignments'
 $appRows = @()
 $fedRows = @()
 foreach ($pair in @(@{ id = $audienceAppId; purpose = 'Token audience for the JFrog OIDC exchange (Foundry pulls images)'; origin = 'Pre-existing' },
-                    @{ id = $pipelineAppId; purpose = 'GitHub Actions deploy identity (federated, no secret)'; origin = 'Created: bootstrap script' })) {
+                    @{ id = $pipelineAppId; purpose = 'GitHub Actions agent deploy identity (federated to environment agent, no secret)'; origin = 'Created: bootstrap script' })) {
     if (-not $pair.id) { continue }
     $app = Invoke-Json ad app show --id $pair.id
     if (-not $app) { continue }
@@ -152,7 +146,7 @@ $roleRows = @()
 if ($pipelineAppId) {
     $sp = Invoke-Json ad sp show --id $pipelineAppId
     foreach ($ra in (Invoke-Json role assignment list --assignee $sp.id --all)) {
-        $roleRows += [pscustomobject]@{ Principal = 'GitHub Actions deploy identity'; Role = $ra.roleDefinitionName; Scope = Format-Scope $ra.scope }
+        $roleRows += [pscustomobject]@{ Principal = 'GitHub Actions agent deploy identity'; Role = $ra.roleDefinitionName; Scope = Format-Scope $ra.scope }
     }
 }
 if ($stateAccount) {
@@ -168,16 +162,10 @@ $runners = (& gh api "repos/$Repo/actions/runners" | ConvertFrom-Json).runners
 $runnerRows = $runners | ForEach-Object {
     [pscustomobject]@{ Runner = "``$($_.name)``"; Status = $_.status; Labels = (($_.labels | ForEach-Object name) -join ', ') }
 }
-$varNames = (& gh variable list --repo $Repo --json name | ConvertFrom-Json).name | Sort-Object
+$varNames = (& gh variable list --repo $Repo --env agent --json name | ConvertFrom-Json).name | Sort-Object
 $lastRun = (& gh run list --repo $Repo --limit 1 --json displayTitle,conclusion,status,headSha,createdAt | ConvertFrom-Json) | Select-Object -First 1
 
-$runnerVm = $resources | Where-Object { $_.type -eq 'Microsoft.Compute/virtualMachines' } | Select-Object -First 1
-$runnerSize = if ($runnerVm) { (Invoke-Json vm show --ids $runnerVm.id).hardwareProfile.vmSize } else { 'n/a' }
-$vnet = $resources | Where-Object { $_.type -eq 'Microsoft.Network/virtualNetworks' } | Select-Object -First 1
-$vnetPrefix = if ($vnet) { ((Invoke-Json network vnet show --ids $vnet.id).addressSpace.addressPrefixes) -join ', ' } else { 'n/a' }
-
-$image = (Select-String -Path (Join-Path $root 'azure.yaml') -Pattern '^\s*image:\s*"?([^"\s]+)"?' | Select-Object -First 1).Matches[0].Groups[1].Value
-$jfrogHost = $image.Split('/')[0]
+$jfrogHost = ($registryTarget -replace '^https://', '').TrimEnd('/')
 
 # ---- Render ------------------------------------------------------------------------------
 $generated = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm') + ' UTC'
@@ -192,8 +180,9 @@ IDs (subscription, tenant, object and client IDs) are redacted. Secrets are neve
 - **Project**: a Microsoft Foundry hosted agent (``$agentName``) whose container image is stored in **JFrog Artifactory**, not Azure Container Registry ("bring your own registry").
 - **Image pull**: Foundry pulls the image using **OIDC token exchange**. The Foundry project's managed identity exchanges an Entra token for a short-lived JFrog token, so no registry password is stored.
 - **Model**: the agent answers with model **``$($latest.definition.environment_variables.AZURE_AI_MODEL_DEPLOYMENT_NAME)``** through the Foundry project endpoint, using its own platform-managed identity.
-- **CI/CD**: GitHub Actions builds the image, pushes it to JFrog (GitHub OIDC), and applies Terraform for both the registry connection and hosted agent. The agent is managed through the Foundry data plane with AzAPI. All authentication uses OIDC; no secrets are stored.
-- **Azure location**: resource group ``$resourceGroup``, Foundry in **$location**, CI runner in **$runnerLocation**. azd environment: ``$envName``.
+- **CI/CD**: GitHub Actions builds the image, pushes it to JFrog (GitHub OIDC), and applies Terraform for the hosted agent only. The agent is managed through the Foundry data plane with AzAPI. All authentication uses OIDC; no secrets are stored.
+- **Platform ownership**: the Foundry-to-JFrog registry connection, the CI runner and the Terraform state account belong to the foundation (platform) repo. This repo consumes their published contract and never reads foundation Terraform state.
+- **Azure location**: resource group ``$resourceGroup``, Foundry in **$location**.
 
 ## Foundry
 
@@ -208,7 +197,7 @@ $(ConvertTo-MdTable $deploymentRows @('Deployment', 'Model', 'Version', 'SKU'))
 
 $(ConvertTo-MdTable $connectionRows @('Connection', 'Category', 'Target', 'Metadata'))
 
-The ``$connectionName`` connection is managed by **Terraform (AzAPI)** in ``infra/registry-connection``. It stores the OIDC token-exchange settings: Entra app audience, token endpoint ``/access/api/v1/oidc/token``, and JFrog provider name ``$registryOidc``.
+The ``$connectionName`` connection is managed by **Terraform (AzAPI)** in the **foundation repo**. It stores the OIDC token-exchange settings: Entra app audience, token endpoint ``/access/api/v1/oidc/token``, and JFrog provider name ``$registryOidc``.
 
 ### Hosted agent ``$agentName``
 
@@ -224,17 +213,8 @@ $(ConvertTo-MdTable $resourceRows @('Name', 'Type', 'Region', 'Origin'))
 
 ### Terraform state
 
-- **Registry connection** (``infra/registry-connection``): remote state in storage account ``$stateAccount``, container ``$stateContainer``, key ``$stateKey``. Entra auth only. Public network access is **disabled by subscription policy**, so state is reachable only through the private endpoint from the CI runner VNet.
-- **Hosted agent** (``infra/hosted-agent``): separate remote state in the same account and container, key ``hosted-agent/$envName.tfstate``. It imports the existing logical agent, preserves Foundry version history, and prevents destroy.
-- **CI runner** (``infra/ci-runner``): local state on the operator's machine.
-
-### CI runner network
-
-- **VM**: ``$($runnerVm.name)``, size **$runnerSize**, Ubuntu 24.04, region **$runnerLocation**. It has no public IP and no inbound rules, and is managed with ``az vm run-command``.
-- **VNet**: ``$($vnet.name)`` ($vnetPrefix) with subnets ``runners`` and ``private-endpoints``.
-- **Outbound**: Azure default outbound access. The subscription can't create public IPs, so a NAT gateway isn't possible.
-- **Private endpoint**: blob endpoint of ``$stateAccount``, with private DNS zone ``privatelink.blob.core.windows.net``.
-- **Why a different region**: eastus had no VM capacity when the runner was created.
+- **Hosted agent** (``infra/hosted-agent``): remote state in storage account ``$stateAccount``, its own container ``$stateContainer``, key ``$stateKey``. Entra auth only. Public network access is **disabled by subscription policy**, so state is reachable only through the private endpoint from the platform-owned runner VNet. It imports the existing logical agent, preserves Foundry version history, and prevents destroy.
+- **Foundation state** (registry connection, runner): owned by the foundation repo, in a different container. This project's identity has no access to it.
 
 ## Microsoft Entra ID
 
@@ -253,7 +233,7 @@ $(ConvertTo-MdTable $roleRows @('Principal', 'Role', 'Scope'))
 ## JFrog Artifactory
 
 - **Instance**: ``$registryTarget``
-- **Repositories**: ``$jfrogRepo`` (virtual; image path ``$jfrogHost/$jfrogRepo/agent``) and ``$jfrogRepo-local`` (local; where pushes land)
+- **Repositories**: ``$jfrogRepo`` (from the platform contract; image path ``$jfrogHost/$jfrogRepo/agent``)
 - **Image tags**: CI pushes ``agent:sha-<commit>``. Tags ``0.1`` and ``0.2`` were pushed by hand during setup.
 - **OIDC integrations**:
 
@@ -271,7 +251,7 @@ $(ConvertTo-MdTable $roleRows @('Principal', 'Role', 'Scope'))
 
 $(ConvertTo-MdTable $runnerRows @('Runner', 'Status', 'Labels'))
 
-### Repository variables
+### Agent environment variables
 
 $(($varNames | ForEach-Object { "``$_``" }) -join ', ')
 
@@ -281,11 +261,8 @@ $(($varNames | ForEach-Object { "``$_``" }) -join ', ')
 |---|---|
 | ``app.py`` | FastAPI Responses-protocol agent (echo or model mode); serves ``/responses``, ``/readiness``, ``/liveness`` |
 | ``azure.yaml`` | Legacy azd compatibility/reference definition; not the CI/CD source of truth |
-| ``infra/registry-connection/`` | Terraform (AzAPI) for the Foundry registry connection |
 | ``infra/hosted-agent/`` | Terraform (AzAPI data plane) for the logical hosted agent and versions |
-| ``infra/ci-runner/`` | Terraform (AzAPI) for the runner VNet, private endpoint and VM |
-| ``scripts/bootstrap-github-oidc.ps1`` | Entra app, federated credential, RBAC, state storage, GitHub variables |
-| ``scripts/setup-runner.ps1`` | Provisions and registers the self-hosted runner |
+| ``scripts/bootstrap-github-oidc.ps1`` | Agent Entra app, environment-scoped federated credential, agent-state RBAC, ``agent`` GitHub Environment |
 | ``scripts/generate-asset-inventory.ps1`` | Generates this file |
 | ``knowledge/`` | Knowledge files bundled into the agent image |
 "@

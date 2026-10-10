@@ -16,11 +16,11 @@ variable "agent_name" {
 
 variable "image_uri" {
   type        = string
-  description = "Prebuilt linux/amd64 image in the private registry."
+  description = "Immutable linux/amd64 image digest URI in the private registry."
 
   validation {
-    condition     = can(regex("^[^/]+/.+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9_.-]+)$", var.image_uri))
-    error_message = "Use a registry image URI with a tag or sha256 digest."
+    condition     = can(regex("^[^/]+/.+@sha256:[0-9a-f]{64}$", var.image_uri))
+    error_message = "Use an immutable registry image URI ending in @sha256:<64 lowercase hex characters>."
   }
 }
 

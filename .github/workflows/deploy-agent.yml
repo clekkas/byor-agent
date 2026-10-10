@@ -1,8 +1,11 @@
 name: Build and deploy hosted agent
 
-# Build -> push to JFrog (GitHub OIDC) -> Terraform apply registry connection and
-# hosted-agent data-plane resource (Azure OIDC) -> REST smoke test. No stored secrets; run
-# scripts/bootstrap-github-oidc.ps1 once to create the identity and repo variables.
+# Build -> push to JFrog (GitHub OIDC) -> validate the platform contract ->
+# deploy the hosted-agent data-plane resource (Azure OIDC) -> REST smoke test.
+#
+# Platform values (AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, FOUNDRY_*, JFROG_*, JF_URL) come from the
+# contract published by the foundation repo and are copied into the `agent` environment as variables.
+# This repo never reads foundation Terraform state.
 
 on:
   push:
@@ -12,7 +15,7 @@ on:
       - knowledge/**
       - requirements*.txt
       - Dockerfile
-      - infra/**
+      - infra/hosted-agent/**
       - scripts/test-hosted-agent.py
       - .github/workflows/deploy-agent.yml
   workflow_dispatch:
@@ -32,13 +35,16 @@ concurrency:
 
 env:
   AGENT_SERVICE: private-registry-agent
+  # Image name inside the platform-owned JFrog repository (JFROG_REPO).
+  IMAGE_NAME: agent
 
 jobs:
   build:
     name: Build and push image
+    environment: agent
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.meta.outputs.image }}
+      image: ${{ steps.digest.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -49,10 +55,21 @@ jobs:
           JFROG_REPO: ${{ vars.JFROG_REPO }}
           INPUT_TAG: ${{ inputs.image_tag }}
         run: |
+          test -n "$JF_URL" || {
+            echo "::error::Missing agent environment variable JF_URL (platform contract)"
+            exit 1
+          }
+          test -n "$JFROG_REPO" || {
+            echo "::error::Missing agent environment variable JFROG_REPO (platform contract)"
+            exit 1
+          }
           host="${JF_URL#https://}"
+          host="${host%/}"
+          repository="${JFROG_REPO#/}"
+          repository="${repository%/}"
           tag="${INPUT_TAG:-sha-${GITHUB_SHA::7}}"
           echo "host=${host}" >> "$GITHUB_OUTPUT"
-          echo "image=${host}/${JFROG_REPO}/agent:${tag}" >> "$GITHUB_OUTPUT"
+          echo "image=${host}/${repository}/${IMAGE_NAME}:${tag}" >> "$GITHUB_OUTPUT"
           echo "build=$([ -z "${INPUT_TAG}" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: JFrog login (GitHub OIDC)
@@ -99,39 +116,55 @@ jobs:
       - name: Verify image exists in JFrog
         run: docker manifest inspect "${{ steps.meta.outputs.image }}" >/dev/null
 
+      - name: Resolve immutable image digest
+        id: digest
+        run: |
+          docker pull "${{ steps.meta.outputs.image }}" >/dev/null
+          image="$(docker image inspect \
+            --format '{{index .RepoDigests 0}}' \
+            "${{ steps.meta.outputs.image }}")"
+          case "$image" in
+            *@sha256:????????????????????????????????????????????????????????????????) ;;
+            *)
+              echo "::error::JFrog did not return an immutable sha256 image digest"
+              exit 1
+              ;;
+          esac
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Resolved immutable image: $image"
+
   deploy:
     name: Terraform agent deploy
     needs: build
+    environment: agent
     # Self-hosted runner inside the VNet: Terraform state is only reachable via private endpoint.
     runs-on: [self-hosted, linux, "${{ vars.RUNNER_LABEL }}"]
     env:
-      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AGENT_AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
-      # Terraform azapi provider + azurerm backend authenticate with GitHub OIDC.
-      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_CLIENT_ID: ${{ vars.AGENT_AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       ARM_USE_OIDC: "true"
       TF_IN_AUTOMATION: "true"
-      TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      TF_VAR_tenant_id: ${{ vars.AZURE_TENANT_ID }}
-      TF_VAR_resource_group_name: ${{ vars.AZURE_RESOURCE_GROUP }}
-      TF_VAR_foundry_account_name: ${{ vars.FOUNDRY_ACCOUNT_NAME }}
-      TF_VAR_foundry_project_name: ${{ vars.FOUNDRY_PROJECT_NAME }}
-      TF_VAR_connection_name: ${{ vars.JFROG_REGISTRY_CONNECTION_NAME }}
-      TF_VAR_registry_target: ${{ vars.JF_URL }}
-      TF_VAR_token_audience: ${{ vars.REGISTRY_TOKEN_AUDIENCE }}
-      TF_VAR_token_endpoint: ${{ vars.REGISTRY_TOKEN_ENDPOINT }}
-      TF_VAR_oidc_provider_name: ${{ vars.REGISTRY_OIDC_PROVIDER_NAME }}
-      TF_VAR_import_existing_connection: ${{ vars.REGISTRY_IMPORT_EXISTING }}
+      FOUNDRY_PROJECT_RESOURCE_ID: ${{ vars.FOUNDRY_PROJECT_RESOURCE_ID }}
+      JF_URL: ${{ vars.JF_URL }}
+      JFROG_REPO: ${{ vars.JFROG_REPO }}
+      RAI_POLICY_ID: ${{ vars.RAI_POLICY_ID }}
+      SUPPORTED_AGENT_SKUS: ${{ vars.SUPPORTED_AGENT_SKUS }}
       TF_VAR_project_endpoint: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
       TF_VAR_agent_name: private-registry-agent
       TF_VAR_image_uri: ${{ needs.build.outputs.image }}
       TF_VAR_registry_connection_name: ${{ vars.JFROG_REGISTRY_CONNECTION_NAME }}
-      TF_VAR_model_deployment_name: gpt-5-mini
+      TF_VAR_model_deployment_name: ${{ vars.MODEL_DEPLOYMENT_NAME }}
+      TF_VAR_cpu: ${{ vars.AGENT_CPU || '0.5' }}
+      TF_VAR_memory: ${{ vars.AGENT_MEMORY || '1Gi' }}
       TF_VAR_import_existing_agent: "true"
+      STATE_RESOURCE_GROUP: ${{ vars.AGENT_STATE_RESOURCE_GROUP }}
+      STATE_STORAGE_ACCOUNT: ${{ vars.AGENT_STATE_STORAGE_ACCOUNT }}
+      STATE_CONTAINER: ${{ vars.AGENT_STATE_CONTAINER }}
+      STATE_KEY: ${{ vars.AGENT_STATE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -140,34 +173,119 @@ jobs:
           terraform_version: ${{ vars.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
-      - name: Terraform init (remote state)
-        working-directory: infra/registry-connection
-        run: |
-          terraform init -input=false \
-            -backend-config="resource_group_name=${{ vars.RS_RESOURCE_GROUP }}" \
-            -backend-config="storage_account_name=${{ vars.RS_STORAGE_ACCOUNT }}" \
-            -backend-config="container_name=${{ vars.RS_CONTAINER_NAME }}" \
-            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
-            -backend-config="use_azuread_auth=true"
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AGENT_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Terraform plan
-        working-directory: infra/registry-connection
-        run: terraform plan -input=false -out=tfplan
-
-      - name: Terraform apply
-        working-directory: infra/registry-connection
+      - name: Validate platform contract
         run: |
-          terraform apply -input=false tfplan
-          rm -f tfplan
+          required=(
+            FOUNDRY_PROJECT_RESOURCE_ID JF_URL JFROG_REPO SUPPORTED_AGENT_SKUS
+            AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID
+            TF_VAR_project_endpoint TF_VAR_registry_connection_name
+            TF_VAR_model_deployment_name TF_VAR_image_uri
+            TF_VAR_cpu TF_VAR_memory
+            STATE_RESOURCE_GROUP STATE_STORAGE_ACCOUNT STATE_CONTAINER STATE_KEY
+          )
+          for name in "${required[@]}"; do
+            test -n "${!name:-}" || {
+              echo "::error::Missing agent environment variable for ${name}"
+              exit 1
+            }
+          done
+
+          case "$TF_VAR_project_endpoint" in
+            https://*/api/projects/*) ;;
+            *)
+              echo "::error::Invalid Foundry project endpoint in platform contract"
+              exit 1
+              ;;
+          esac
+          case "${FOUNDRY_PROJECT_RESOURCE_ID,,}" in
+            "/subscriptions/${AZURE_SUBSCRIPTION_ID,,}/resourcegroups/"*"/providers/microsoft.cognitiveservices/accounts/"*"/projects/"*) ;;
+            *)
+              echo "::error::FOUNDRY_PROJECT_RESOURCE_ID is invalid or belongs to a different subscription"
+              exit 1
+              ;;
+          esac
+          case "$JF_URL" in
+            https://*) ;;
+            *)
+              echo "::error::JF_URL must be an HTTPS origin"
+              exit 1
+              ;;
+          esac
+          if [ -n "$RAI_POLICY_ID" ]; then
+            case "$RAI_POLICY_ID" in
+              /subscriptions/*) ;;
+              *)
+                echo "::error::RAI_POLICY_ID must be an Azure resource ID when set"
+                exit 1
+                ;;
+            esac
+          fi
+
+          connection_id="${FOUNDRY_PROJECT_RESOURCE_ID}/connections/${TF_VAR_registry_connection_name}"
+          url="https://management.azure.com${connection_id}?api-version=2025-06-01"
+          target="$(az rest --method get --url "$url" --query properties.target --output tsv)"
+          type="$(az rest --method get --url "$url" --query properties.metadata.type --output tsv)"
+          mode="$(az rest --method get --url "$url" --query properties.metadata.mode --output tsv)"
+          test "${target%/}" = "${JF_URL%/}" || {
+            echo "::error::Live registry target does not match the approved platform contract"
+            exit 1
+          }
+          test "$type" = "registry_connection" || {
+            echo "::error::Platform connection metadata.type is not registry_connection"
+            exit 1
+          }
+          test "$mode" = "oauth_token_exchange" || {
+            echo "::error::Platform connection metadata.mode is not oauth_token_exchange"
+            exit 1
+          }
+
+          image_host="${TF_VAR_image_uri%%/*}"
+          contract_host="${JF_URL#https://}"
+          contract_host="${contract_host%/}"
+          test "$image_host" = "$contract_host" || {
+            echo "::error::Candidate image is not hosted by the registry approved in the platform contract"
+            exit 1
+          }
+          image_path="${TF_VAR_image_uri#*/}"
+          case "$image_path" in
+            "${JFROG_REPO#/}/${IMAGE_NAME}"@sha256:*) ;;
+            *)
+              echo "::error::Candidate image is not an immutable digest under JFROG_REPO/${IMAGE_NAME}"
+              exit 1
+              ;;
+          esac
+
+          requested_sku="${TF_VAR_cpu}:${TF_VAR_memory}"
+          sku_supported=false
+          IFS=',' read -ra allowed_skus <<< "$SUPPORTED_AGENT_SKUS"
+          for sku in "${allowed_skus[@]}"; do
+            sku="${sku//[[:space:]]/}"
+            if [ "$sku" = "$requested_sku" ]; then
+              sku_supported=true
+              break
+            fi
+          done
+          if [ "$sku_supported" != true ]; then
+            echo "::error::Requested hosted-agent SKU ${requested_sku} is not listed in SUPPORTED_AGENT_SKUS"
+            exit 1
+          fi
+          echo "Validated platform contract values against the live connection"
 
       - name: Terraform init (hosted-agent state)
         working-directory: infra/hosted-agent
         run: |
           terraform init -input=false \
-            -backend-config="resource_group_name=${{ vars.RS_RESOURCE_GROUP }}" \
-            -backend-config="storage_account_name=${{ vars.RS_STORAGE_ACCOUNT }}" \
-            -backend-config="container_name=${{ vars.RS_CONTAINER_NAME }}" \
-            -backend-config="key=hosted-agent/${AZURE_ENV_NAME}.tfstate" \
+            -backend-config="resource_group_name=${STATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${STATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${STATE_CONTAINER}" \
+            -backend-config="key=${STATE_KEY}" \
             -backend-config="use_azuread_auth=true"
 
       - name: Terraform plan (adopt agent and create candidate version)
