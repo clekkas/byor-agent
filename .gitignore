@@ -17,3 +17,6 @@ jfrog-oidc-setup.txt
 session-log.txt
 
 foundry-*.json
+
+# Stray local Python install (created by the Windows py launcher)
+/Python/
