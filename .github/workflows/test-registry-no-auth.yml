@@ -1,0 +1,128 @@
+name: Test private registry without explicit connection
+
+on:
+  workflow_dispatch:
+    inputs:
+      acknowledge_private_test:
+        description: Keep JFrog private; deploy and delete isolated test agents
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+concurrency:
+  group: registry-no-auth-experiment
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: agent
+    timeout-minutes: 20
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Require explicit acknowledgement
+        env:
+          ACKNOWLEDGED: ${{ inputs.acknowledge_private_test }}
+        run: test "$ACKNOWLEDGED" = true
+      - uses: actions/checkout@v4
+      - name: JFrog publishing login
+        id: jfrog
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ vars.JF_URL }}
+        with:
+          oidc-provider-name: ${{ vars.JFROG_GITHUB_OIDC_PROVIDER }}
+          disable-job-summary: true
+          disable-auto-build-publish: true
+      - uses: docker/login-action@v3
+        with:
+          registry: trialndswdc.jfrog.io
+          username: ${{ steps.jfrog.outputs.oidc-user }}
+          password: ${{ steps.jfrog.outputs.oidc-token }}
+      - name: Publish fresh nonce-bearing layer and prepare evidence
+        id: image
+        env:
+          JFROG_USER: ${{ steps.jfrog.outputs.oidc-user }}
+          JFROG_TOKEN: ${{ steps.jfrog.outputs.oidc-token }}
+        run: |
+          set -euo pipefail
+          nonce="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+          image="trialndswdc.jfrog.io/byor-demo-docker/agent:probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker build --platform linux/amd64 -t registry-probe-base .
+          mkdir -p "$RUNNER_TEMP/probe-build"
+          printf '%s\n' "$nonce" > "$RUNNER_TEMP/probe-build/probe-nonce.txt"
+          printf 'FROM registry-probe-base\nCOPY probe-nonce.txt /app/probe-nonce.txt\n' > "$RUNNER_TEMP/probe-build/Dockerfile"
+          docker build --platform linux/amd64 -t "$image" "$RUNNER_TEMP/probe-build"
+          test "$(docker run --rm "$image" cat /app/probe-nonce.txt)" = "$nonce"
+          docker push "$image"
+          docker pull "$image" >/dev/null
+          digest_image="$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")"
+          python3 scripts/test-registry-no-auth.py --prepare --image "$digest_image" \
+            --nonce "$nonce" --evidence image-evidence.json
+          echo "image=$digest_image" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: registry-image-evidence
+          path: image-evidence.json
+          if-no-files-found: error
+
+  experiment:
+    needs: build
+    runs-on: [self-hosted, linux, "${{ vars.RUNNER_LABEL }}"]
+    environment: agent
+    # Share the production deployment lock, without changing its workflow.
+    concurrency:
+      group: hosted-agent-deployment
+      cancel-in-progress: false
+    timeout-minutes: 80
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AGENT_AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: registry-image-evidence
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AGENT_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Test omission first, then authenticated control
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          account="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/kaiser-foundry-rg/providers/Microsoft.CognitiveServices/accounts/kaiser-foundry-resource"
+          az rest --method get --url "https://management.azure.com${account}/connections?api-version=2025-04-01-preview" \
+            --query 'value[].{name:name,target:properties.target,metadata:properties.metadata}' \
+            -o json > account-connections.json
+          az rest --method get --url "https://management.azure.com${account}/projects/workshop-demo-project/connections?api-version=2025-04-01-preview" \
+            --query 'value[].{name:name,target:properties.target,metadata:properties.metadata}' \
+            -o json > project-connections.json
+          python3 scripts/test-registry-no-auth.py --acknowledge-private-test \
+            --image "$IMAGE" --evidence image-evidence.json \
+            --ledger registry-experiment.json
+      - name: Recover and verify owned-resource cleanup
+        if: always()
+        run: |
+          python3 scripts/test-registry-no-auth.py --cleanup \
+            --evidence image-evidence.json --ledger registry-experiment.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: registry-experiment-evidence
+          path: |
+            image-evidence.json
+            registry-experiment.json
+            account-connections.json
+            project-connections.json
+          if-no-files-found: error

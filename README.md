@@ -50,6 +50,40 @@ curl -X POST localhost:8088/responses -H 'Content-Type: application/json' \
 
 Expected: a JSON envelope with `status: "completed"` and an `output_text` field.
 
+## Isolated registry-connection omission experiment
+
+`test-registry-no-auth.yml` is **manual-only**. Acknowledging its input publishes
+a test image with a unique nonce-bearing filesystem layer, then deploys separate
+`registry-probe-*` agents in `workshop-demo-project`: connection omitted first,
+followed by an explicit `jfrog-registry-acct` control using the same digest.
+JFrog stays private. Normal release connection validation and production agents
+are not changed. The BYOR private runner must be online before dispatch.
+
+The script checks anonymous manifest/config/new-layer access through the full
+Docker bearer challenge flow, verifies exact candidate versions with an echo
+smoke test, and deletes its temporary agents after each attempt. Evidence
+artifacts include the digest tree, sanitized status/error history, visible
+connection metadata, conclusions, and cleanup ledger. The experiment image/tag
+is retained for diagnostics; no production image tags are overwritten.
+
+**Omitting a connection is not proof of anonymous authentication.** Shared
+connections/default identities remain available. A successful omitted-connection
+candidate is reported as authentication-inconclusive unless separately
+correlated JFrog pull/access records establish the actual principal. Tokens,
+connection keys, signed URLs, and raw error messages are not stored.
+
+If the workflow is forcibly interrupted, rerun only the owned-resource cleanup
+from its downloaded ledger, using an authorized Azure token supplied through
+`AZURE_AI_ACCESS_TOKEN`:
+
+```powershell
+python scripts\test-registry-no-auth.py --cleanup --evidence image-evidence.json --ledger registry-experiment.json
+```
+
+Cleanup rejects other endpoints, unowned names, and production names; verify
+that `owned_agents` is empty afterward. Do not rerun the omission case on an
+image already warmed by its control: dispatch a new run with a new nonce layer.
+
 ## Platform contract (what the foundation repo provides)
 
 The foundation repo publishes a non-secret contract per environment: `foundry-<env>.json` in the `platform-contract-<env>` workflow artifact. It holds a flat `values` map and a `valuesSha256` over it. This repo consumes these keys unchanged:
