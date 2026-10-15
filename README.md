@@ -84,6 +84,24 @@ Cleanup rejects other endpoints, unowned names, and production names; verify
 that `owned_agents` is empty afterward. Do not rerun the omission case on an
 image already warmed by its control: dispatch a new run with a new nonce layer.
 
+### Observed result: October 14, 2026
+
+[Experiment run 38665375428](https://github.com/clekkas/byor-agent/actions/runs/38665375428)
+tested image digest `sha256:870a51a343ddcf34d6f0672ef4474c2375096fe13e8823fbbb7a9b9167da543f`,
+including a verified fresh nonce-bearing layer.
+
+| Case | Result |
+|---|---|
+| Anonymous manifest, config, and new-layer reads, including bearer challenge handling | All returned HTTP 401 |
+| Temporary agent with registry connection omitted | API accepted the definition; the returned definition also omitted the field. Version 1 failed with `ProvisioningError`. |
+| Separate temporary agent with explicit `jfrog-registry-acct`, same digest | Version 1 became active and passed the candidate-pinned echo test |
+
+The omitted-connection deployment **did not work in this configuration**.
+The generic provisioning error and lack of attributable JFrog pull logs do not
+establish its exact cause or prove a universal authentication requirement.
+Both temporary agents were deleted; production BYOR version 20 and mykp
+version 5 were unchanged. Sanitized evidence is attached to the workflow run.
+
 ## Platform contract (what the foundation repo provides)
 
 The foundation repo publishes a non-secret contract per environment: `foundry-<env>.json` in the `platform-contract-<env>` workflow artifact. It holds a flat `values` map and a `valuesSha256` over it. This repo consumes these keys unchanged:
