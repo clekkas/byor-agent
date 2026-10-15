@@ -51,6 +51,14 @@ def post(url, payload, raw=False):
     return body if raw else json.loads(body)
 
 
+def check_execution(response, mode):
+    metadata = response.get("metadata", {})
+    check("executed expected mode", metadata.get("execution_mode") == mode, str(metadata))
+    if mode == "model":
+        check("has model-call evidence", bool(metadata.get("upstream_response_id")) and
+              metadata.get("model_deployment") == response.get("model"), str(metadata))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:8088")
@@ -72,11 +80,12 @@ def main():
 
     print("\n[2] string input")
     try:
-        r = post(f"{base}/responses", {"input": "Respond with a short deployment confirmation."})
+        r = post(f"{base}/responses", {"input": "For this Foundry check, describe the JFrog image pull connection."})
         print(f"      {r.get('output_text', '')[:160]}")
         check("status completed", r.get("status") == "completed", str(r.get("status")))
         check("has output_text", bool(r.get("output_text")))
         check("has output[] message", bool(r.get("output")) and r["output"][0].get("type") == "message")
+        check_execution(r, mode)
     except Exception as e:
         check("string input", False, str(e))
 
@@ -89,21 +98,29 @@ def main():
         out = r2.get("output_text", "")
         print(f"      {out[:120]}")
         check("array input accepted", "ARRAYOK" in out, out[:80])
+        check_execution(r2, mode)
     except Exception as e:
         check("array input accepted", False, str(e))
 
     print("\n[4] versioned path alias")
     try:
-        r3 = post(f"{base}/v1/responses", {"input": "alias check"})
+        r3 = post(f"{base}/v1/responses", {"input": "Foundry alias check"})
         check("/v1/responses works", bool(r3.get("output_text")))
+        check_execution(r3, mode)
     except Exception as e:
         check("/v1/responses works", False, str(e))
 
     print("\n[5] streaming (SSE)")
     try:
-        raw = post(f"{base}/responses", {"input": "stream check", "stream": True}, raw=True)
+        raw = post(f"{base}/responses", {"input": "Foundry stream check", "stream": True}, raw=True)
         print(f"      {raw[:140].replace(chr(10), ' ')}")
         check("emits response.completed", "response.completed" in raw)
+        completed = [
+            json.loads(line[6:])["response"] for line in raw.splitlines()
+            if line.startswith("data: ") and json.loads(line[6:]).get("type") == "response.completed"
+        ]
+        if completed:
+            check_execution(completed[0], mode)
     except Exception as e:
         check("emits response.completed", False, str(e))
 

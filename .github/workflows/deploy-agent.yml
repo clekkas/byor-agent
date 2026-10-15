@@ -106,8 +106,8 @@ jobs:
           curl -fsS http://localhost:8088/liveness
           curl -fsS -X POST http://localhost:8088/responses \
             -H 'Content-Type: application/json' \
-            -d '{"input":"ci smoke test"}' | tee /tmp/resp.json
-          grep -q '"status":"completed"' /tmp/resp.json
+            -d '{"input":"Foundry image smoke test"}' | tee /tmp/resp.json
+          python3 -c 'import json; r=json.load(open("/tmp/resp.json")); assert r["status"] == "completed" and r["output_text"] and r["metadata"]["execution_mode"] == "echo", r'
 
       - name: Push
         if: steps.meta.outputs.build == 'true'
@@ -186,7 +186,7 @@ jobs:
             FOUNDRY_PROJECT_RESOURCE_ID JF_URL JFROG_REPO SUPPORTED_AGENT_SKUS
             AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID
             TF_VAR_project_endpoint TF_VAR_registry_connection_name
-            TF_VAR_model_deployment_name TF_VAR_image_uri
+            TF_VAR_image_uri
             TF_VAR_cpu TF_VAR_memory
             STATE_RESOURCE_GROUP STATE_STORAGE_ACCOUNT STATE_CONTAINER STATE_KEY
           )
@@ -313,4 +313,5 @@ jobs:
             --endpoint "$TF_VAR_project_endpoint" \
             --agent "$TF_VAR_agent_name" \
             --version "${{ steps.agent.outputs.version }}" \
-            --expected-image "$TF_VAR_image_uri"
+            --expected-image "$TF_VAR_image_uri" \
+            --expected-model "$TF_VAR_model_deployment_name"

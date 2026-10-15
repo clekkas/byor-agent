@@ -19,10 +19,11 @@ def required_environment(name):
     return value
 
 
-def request_json(url, *, headers=None, data=None, timeout=30):
-    request = urllib.request.Request(url, data=data, headers=headers or {})
+def request_json(url, *, headers=None, data=None, timeout=30, method=None):
+    request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+        raw = response.read()
+        return json.loads(raw.decode("utf-8")) if raw else {}
 
 
 def get_access_token():
@@ -95,7 +96,7 @@ def wait_until_active(endpoint, agent_name, version, expected_image, token, time
                         f"Active version image mismatch: expected {expected_image!r}, got {image!r}"
                     )
                 print(f"Agent version {version} is active with the expected image.")
-                return
+                return body
             if status in {"failed", "deleting", "deleted"}:
                 raise RuntimeError(f"Agent version {version} entered terminal status {status!r}")
             if status != "creating":
@@ -107,13 +108,13 @@ def wait_until_active(endpoint, agent_name, version, expected_image, token, time
     raise TimeoutError(f"Timed out waiting for agent version {version} to become active")
 
 
-def invoke(endpoint, agent_name, token, prompt):
+def invoke(endpoint, agent_name, token, prompt, session_id, expected_model):
     agent_path = urllib.parse.quote(agent_name, safe="")
     url = (
         f"{endpoint.rstrip('/')}/agents/{agent_path}"
         "/endpoint/protocols/openai/responses?api-version=v1"
     )
-    body = json.dumps({"input": prompt}).encode("utf-8")
+    body = json.dumps({"input": prompt, "agent_session_id": session_id}).encode("utf-8")
     response = request_json(
         url,
         headers={
@@ -126,9 +127,81 @@ def invoke(endpoint, agent_name, token, prompt):
     if response.get("status") != "completed":
         raise RuntimeError(f"Smoke test returned status {response.get('status')!r}")
     output_text = response.get("output_text")
-    if not output_text:
+    if not isinstance(output_text, str) or not output_text.strip():
         raise RuntimeError("Smoke test returned no output_text")
+    metadata = response.get("metadata")
+    if not isinstance(metadata, dict):
+        raise RuntimeError("Smoke test returned no execution provenance")
+    expected_mode = "model" if expected_model else "echo"
+    if metadata.get("execution_mode") != expected_mode:
+        raise RuntimeError(f"Smoke test did not execute the expected {expected_mode} path")
+    if expected_model:
+        upstream_id = metadata.get("upstream_response_id")
+        if metadata.get("model_deployment") != expected_model or not isinstance(upstream_id, str) or not upstream_id.strip():
+            raise RuntimeError("Smoke test returned no evidence of the expected model call")
     print(f"Agent smoke test completed: {output_text[:200]}")
+
+
+def session_url(endpoint, agent_name, session_id=None):
+    url = f"{endpoint.rstrip('/')}/agents/{urllib.parse.quote(agent_name, safe='')}/endpoint/sessions"
+    if session_id is not None:
+        url += f"/{urllib.parse.quote(session_id, safe='')}"
+    return f"{url}?api-version=v1"
+
+
+def wait_for_session(url, token, timeout, interval):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            body = request_json(url, headers={"Authorization": f"Bearer {token}"})
+        except urllib.error.HTTPError as error:
+            if error.code not in TRANSIENT_STATUS_CODES:
+                raise RuntimeError(f"Session lookup failed with HTTP {error.code}") from error
+            print(f"Transient session HTTP {error.code}; retrying.", flush=True)
+        except (TimeoutError, urllib.error.URLError) as error:
+            print(f"Transient session-request failure: {error}; retrying.", flush=True)
+        else:
+            status = body.get("status")
+            if status == "active":
+                return
+            if status != "creating":
+                raise RuntimeError(f"Smoke session entered unexpected status {status!r}")
+        time.sleep(min(interval, max(0, deadline - time.monotonic())))
+    raise TimeoutError("Timed out waiting for the candidate-pinned smoke session")
+
+
+def smoke_candidate(endpoint, agent_name, version, version_info, token, timeout, interval, expected_model=None):
+    configured_model = version_info.get("definition", {}).get("environment_variables", {}).get("AZURE_AI_MODEL_DEPLOYMENT_NAME", "")
+    if not isinstance(configured_model, str):
+        raise RuntimeError("Candidate model deployment must be a string")
+    if expected_model is None:
+        expected_model = configured_model
+    if configured_model != expected_model:
+        raise RuntimeError(f"Candidate model mismatch: expected {expected_model!r}, got {configured_model!r}")
+    session = request_json(
+        session_url(endpoint, agent_name),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        data=json.dumps({"version_indicator": {"type": "version_ref", "agent_version": version}}).encode("utf-8"),
+    )
+    session_id = session.get("agent_session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise RuntimeError("Foundry returned no ID for the candidate-pinned session")
+    owned_url = session_url(endpoint, agent_name, session_id)
+    try:
+        wait_for_session(owned_url, token, timeout, interval)
+        invoke(
+            endpoint, agent_name, token,
+            "For this Foundry deployment check, briefly describe the JFrog image pull connection.",
+            session_id, expected_model,
+        )
+    finally:
+        primary_failure = sys.exc_info()[0] is not None
+        try:
+            request_json(owned_url, headers={"Authorization": f"Bearer {token}"}, method="DELETE")
+        except (urllib.error.URLError, TimeoutError, ValueError) as error:
+            if not primary_failure:
+                raise RuntimeError(f"Smoke session cleanup failed for {session_id}: {error}") from error
+            print(f"Smoke session cleanup also failed for {session_id}: {error}", file=sys.stderr)
 
 
 def main():
@@ -139,13 +212,14 @@ def main():
     parser.add_argument("--expected-image", required=True)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--interval", type=int, default=10)
+    parser.add_argument("--expected-model", help="Expected model deployment; pass an empty string for echo, or omit to infer from the candidate")
     args = parser.parse_args()
 
     if args.timeout <= 0 or args.interval <= 0:
         parser.error("--timeout and --interval must be positive")
 
     token = get_access_token()
-    wait_until_active(
+    version_info = wait_until_active(
         args.endpoint,
         args.agent,
         args.version,
@@ -154,11 +228,15 @@ def main():
         args.timeout,
         args.interval,
     )
-    invoke(
+    smoke_candidate(
         args.endpoint,
         args.agent,
+        args.version,
+        version_info,
         token,
-        "Respond with a short deployment confirmation.",
+        args.timeout,
+        args.interval,
+        args.expected_model,
     )
     return 0
 

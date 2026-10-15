@@ -27,6 +27,7 @@ import os
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -106,8 +107,10 @@ def get_model_client():
     global _client
     if _client is not None:
         return _client
-    if not (MODEL_DEPLOYMENT and PROJECT_ENDPOINT):
+    if not MODEL_DEPLOYMENT:
         return None
+    if not PROJECT_ENDPOINT:
+        raise RuntimeError("FOUNDRY_PROJECT_ENDPOINT is required when a model is configured")
     from azure.identity import DefaultAzureCredential, get_bearer_token_provider
     from openai import OpenAI
 
@@ -224,28 +227,49 @@ def answer_capital_question(prompt: str) -> Optional[str]:
         for country, city in matches
     )
 
-def answer(prompt: str) -> str:
+@dataclass(frozen=True)
+class Answer:
+    text: str
+    execution_mode: str
+    upstream_response_id: str = ""
+    model_deployment: str = ""
+
+    def metadata(self) -> Dict[str, str]:
+        evidence = {"execution_mode": self.execution_mode}
+        if self.execution_mode == "model":
+            evidence["model_deployment"] = self.model_deployment
+            evidence["upstream_response_id"] = self.upstream_response_id
+        return evidence
+
+
+def answer(prompt: str) -> Answer:
     capital_answer = answer_capital_question(prompt)
     if capital_answer is not None:
         print("scope_gate=capital_lookup", flush=True)
-        return capital_answer
+        return Answer(capital_answer, "knowledge_lookup")
     
     in_scope = any(term_in(term, prompt.lower()) for term in SCOPE_TERMS)
     print(f"scope_gate={'pass' if in_scope else 'blocked'}", flush=True)
     if not in_scope:
-        return SCOPE_BLOCKED_REPLY
+        return Answer(SCOPE_BLOCKED_REPLY, "scope_blocked")
     client = get_model_client()
     if client is None:
-        return (
+        return Answer(
             f"[{APP_NAME}] Hosted agent is running from a private registry image. "
-            f"Echo mode (no model deployment configured). You said: {prompt!r}"
+            f"Echo mode (no model deployment configured). You said: {prompt!r}",
+            "echo",
         )
     # Reasoning models (gpt-5 family) reject legacy sampling parameters, so none are sent.
-    result = client.responses.create(model=MODEL_DEPLOYMENT, instructions=INSTRUCTIONS, input=prompt)
-    return result.output_text or ""
+    model_deployment = MODEL_DEPLOYMENT
+    if not model_deployment:
+        raise RuntimeError("A model client requires a configured model deployment")
+    result = client.responses.create(model=model_deployment, instructions=INSTRUCTIONS, input=prompt)
+    if result.status != "completed" or not result.id or not result.output_text:
+        raise RuntimeError("Model response was not completed with an ID and output text")
+    return Answer(result.output_text, "model", result.id, model_deployment)
 
 
-def envelope(text: str, response_id: str, status: str = "completed") -> Dict[str, Any]:
+def envelope(result: Answer, response_id: str, status: str = "completed") -> Dict[str, Any]:
     """Responses-shaped payload: output[] + the output_text convenience field."""
     return {
         "id": response_id,
@@ -253,16 +277,17 @@ def envelope(text: str, response_id: str, status: str = "completed") -> Dict[str
         "created_at": int(time.time()),
         "status": status,
         "model": MODEL_DEPLOYMENT or "echo",
+        "metadata": result.metadata(),
         "output": [
             {
                 "id": f"msg_{uuid.uuid4().hex[:16]}",
                 "type": "message",
                 "role": "assistant",
                 "status": "completed",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
+                "content": [{"type": "output_text", "text": result.text, "annotations": []}],
             }
         ],
-        "output_text": text,
+        "output_text": result.text,
     }
 
 
@@ -286,7 +311,7 @@ async def create_response(request: Request):
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
 
     try:
-        text = answer(prompt)
+        result = answer(prompt)
     except Exception as exc:  # surface failures as a protocol error, not a 500 wall
         return JSONResponse(
             status_code=200,
@@ -299,16 +324,16 @@ async def create_response(request: Request):
         )
 
     if not payload.get("stream"):
-        return JSONResponse(content=envelope(text, response_id))
+        return JSONResponse(content=envelope(result, response_id))
 
     def sse():
-        created = envelope(text, response_id, status="in_progress")
+        created = envelope(result, response_id, status="in_progress")
         yield f"event: response.created\ndata: {json.dumps(created)}\n\n"
         yield (
             "event: response.output_text.delta\n"
-            f"data: {json.dumps({'type': 'response.output_text.delta', 'delta': text})}\n\n"
+            f"data: {json.dumps({'type': 'response.output_text.delta', 'delta': result.text})}\n\n"
         )
-        done = envelope(text, response_id)
+        done = envelope(result, response_id)
         yield f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': done})}\n\n"
 
     return StreamingResponse(sse(), media_type="text/event-stream")
