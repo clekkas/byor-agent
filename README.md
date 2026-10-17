@@ -1,34 +1,58 @@
-# BYOR hosted agent — Step 1 container
+# byor-agent — JFrog BYOR hosted agent (OIDC token exchange) 🔑
 
-Minimal Foundry hosted agent image for the "bring your own registry" (JFrog + OIDC) walkthrough.
+**Microsoft Foundry hosted agent that pulls its container image from a private JFrog Artifactory registry via OIDC token exchange** — zero stored secrets, zero static credentials, just GitHub OIDC → Entra federated identity → JFrog token exchange → image pull.
 
-This repository owns only the **agent**: image build, JFrog push, hosted-agent Terraform and smoke tests. The Foundry-to-JFrog registry connection, the shared CI runner, the Terraform state account and the foundation deployment identities belong to the **foundation (platform) repository** (`jfrog-oidc-foundry`). This repo consumes what the platform publishes (the *platform contract*) and never reads foundation Terraform state.
+[![Deploy](https://github.com/clekkas/byor-agent/actions/workflows/deploy-agent.yml/badge.svg)](https://github.com/clekkas/byor-agent/actions/workflows/deploy-agent.yml)
 
-## Files
+This repository owns only the **agent**: image build, JFrog push, hosted-agent Terraform and smoke tests. The Foundry-to-JFrog registry connection, the shared CI runner, the Terraform state account and the foundation deployment identities belong to the **foundation (platform) repository** ([`jfrog-oidc-foundry`](https://github.com/clekkas/jfrog-oidc-foundry)). This repo consumes what the platform publishes (the *platform contract*) and never reads foundation Terraform state.
 
-| File | Purpose |
-|---|---|
-| `app.py` | FastAPI app serving `POST /responses` (Responses protocol) and `GET /healthz` (reports mode, loaded `knowledge` files and `knowledge_truncated`) |
-| `Dockerfile` | `linux/amd64`, python:3.12-slim, non-root uid 10001, listens on `$PORT` (8088) |
-| `requirements.txt` | fastapi + uvicorn; openai + azure-identity only needed for model mode |
-| `build-and-push.sh` | Build → local smoke test → push to JFrog |
-| `infra/hosted-agent/` | Terraform (AzAPI data plane) for the logical hosted agent; imports the existing agent and preserves its Foundry version history |
-| `scripts/test-hosted-agent.py` | Waits for one exact version to become active, verifies its image, and invokes its Responses endpoint |
-| `deploy.ps1` / `deploy.sh` | Manual plan/apply of the hosted-agent stack (needs network access to the state account) |
-| `.github/workflows/deploy-agent.yml` | CI/CD: build → push to JFrog → Terraform agent version → REST readiness and smoke test |
-| `.github/platform-contract.env.example` | The platform-contract keys this repo consumes, plus the app-owned variables |
-| `scripts/bootstrap-github-oidc.ps1` | One-time: agent Entra app + GitHub OIDC credential, RBAC, `agent-tfstate` container, protected `agent` environment, contract variables |
-| `knowledge/azure-assets.md` + `scripts/generate-asset-inventory.ps1` | Generated asset inventory bundled into the agent as its knowledge base |
-| `knowledge/architecture.md`, `runbook.md`, `jfrog-foundry-reference.md` | Hand-written, condensed project notes (architecture and workflows, operating runbook, JFrog/Foundry reference). Dated and redacted; update them by hand when the platform changes |
-| `azure.yaml` | Legacy azd compatibility/reference only; not the deployment source of truth (its endpoint, image tag and connection name are stale) |
+> Two sibling proof repos validate the opposite end of this spectrum — **anonymous pull with zero registry connection at all**: [`byor-agent-dockerhub`](https://github.com/clekkas/byor-agent-dockerhub) (public Docker Hub) and [`byor-agent-docker`](https://github.com/clekkas/byor-agent-docker) (self-hosted registry). See [🔬 Isolated Registry-Connection Omission Experiment](#-isolated-registry-connection-omission-experiment) below for why that question came up in the first place.
 
-## Modes
+## 🎯 What This Repo Provides
+
+- A minimal FastAPI **Responses-protocol** container (`POST /responses`, `GET /healthz`) that doubles as echo mode (proves the pull/deploy plumbing) or model mode (proves end-to-end Foundry model invocation)
+- **Terraform + AzAPI** management of the logical hosted agent (`azapi_data_plane_resource`, `Microsoft.Foundry/agents@v1`), importing and versioning the existing agent rather than replacing it
+- A **two-job CI/CD pipeline**: build/push to JFrog with GitHub OIDC → Terraform release → smoke test, gated behind a protected GitHub Environment
+- A documented, reusable **knowledge-base pattern**: hand-written + generated Markdown files bundled into the image and surfaced through the agent's own instructions
+- A fully evidenced, repeatable **registry-connection omission experiment** — the direct motivation for the anonymous-pull sibling repos
+
+## 📁 Repository Layout
+
+```
+byor-agent/
+├── app.py                           # FastAPI Responses-protocol app + health probes
+├── Dockerfile                       # linux/amd64, python:3.12-slim, non-root uid 10001
+├── requirements.txt                 # fastapi + uvicorn; openai + azure-identity for model mode
+├── build-and-push.sh                # Build → local smoke test → push to JFrog
+├── deploy.ps1 / deploy.sh           # Manual plan/apply of the hosted-agent stack
+├── infra/
+│   └── hosted-agent/
+│       ├── main.tf                  # Data-plane import ID, agent definition, prevent_destroy
+│       └── terraform.tfvars.example # Project endpoint, digest image, connection, model inputs
+├── scripts/
+│   ├── test-hosted-agent.py         # Waits for one exact version to become active, verifies image + Responses
+│   ├── test-registry-no-auth.py     # The omission experiment harness (manual-only)
+│   └── bootstrap-github-oidc.ps1    # One-time: agent Entra app, RBAC, tfstate container, GitHub environment
+├── knowledge/
+│   ├── azure-assets.md              # Generated asset inventory (scripts/generate-asset-inventory.ps1)
+│   ├── architecture.md              # Hand-written architecture + workflow notes
+│   ├── runbook.md                   # Hand-written operating runbook
+│   └── jfrog-foundry-reference.md   # Hand-written JFrog/Foundry reference
+├── tests/                           # Offline regression tests (mocked model + Foundry APIs)
+└── .github/
+    ├── workflows/
+    │   ├── deploy-agent.yml         # build → push to JFrog → Terraform release → smoke test
+    │   └── test-registry-no-auth.yml # Manual-only: the omission experiment workflow
+    └── platform-contract.env.example # Platform-contract keys this repo consumes
+```
+
+## 🧩 Modes
 
 - **Echo mode (default).** No model call. Proves Foundry exchanged the OIDC token, pulled the image from JFrog, and started the container. Use this for the first deploy — it isolates the registry plumbing from everything else.
 - **Model mode.** Set the protected GitHub Environment variable `MODEL_DEPLOYMENT_NAME` (e.g. `gpt-5-mini`), or Terraform's `model_deployment_name` for manual releases. Terraform injects `AZURE_AI_MODEL_DEPLOYMENT_NAME`; `azure.yaml` is not the deployment source of truth. The agent calls the Responses API on `FOUNDRY_PROJECT_ENDPOINT` (injected by Foundry) with its own Entra identity. The image holds no keys. For local runs, set both `AZURE_AI_MODEL_DEPLOYMENT_NAME` and `FOUNDRY_PROJECT_ENDPOINT`; a configured model without an endpoint fails explicitly. An empty model setting selects echo mode.
 - **Knowledge base.** Every `knowledge/*.md` file is copied into the image and added to the model instructions, so the agent can answer questions about this project's assets. `knowledge/azure-assets.md` is generated by `scripts/generate-asset-inventory.ps1` from live Azure, Entra and GitHub data (platform facts come from the `agent` environment variables). IDs are redacted and no secrets are read. To refresh: run the script, commit, push; the pipeline redeploys because `knowledge/**` is a trigger path. Files are loaded whole, in alphabetical order, up to 60,000 characters in total; any file that does not fit is left out and listed under `knowledge_truncated` in `/healthz` (and printed at startup), so check it after adding files. Everything is sent with every request, which suits a few small files; past the budget, switch to a Foundry vector store with `file_search`. Hand-written files should start with a scope comment, for example `<!-- scope: runner, private endpoint -->`: the code-level scope gate answers only questions that mention a known term, and terms come from backticked names, `key =` lines, a built-in word list and these comments. Avoid `=` characters in hand-written files, since each `key =` line becomes a scope term. Redact IDs and date the document so the agent can say how current it is.
 
-## Run it
+## 🚀 Quick Start
 
 ```bash
 export JFROG_HOST="yourtrial.jfrog.io"
@@ -50,7 +74,7 @@ curl -X POST localhost:8088/responses -H 'Content-Type: application/json' \
 
 Expected: a JSON envelope with `status: "completed"` and an `output_text` field.
 
-## Isolated registry-connection omission experiment
+## 🔬 Isolated Registry-Connection Omission Experiment
 
 `test-registry-no-auth.yml` is **manual-only**. Acknowledging its input publishes
 a test image with a unique nonce-bearing filesystem layer, then deploys separate
@@ -84,7 +108,7 @@ Cleanup rejects other endpoints, unowned names, and production names; verify
 that `owned_agents` is empty afterward. Do not rerun the omission case on an
 image already warmed by its control: dispatch a new run with a new nonce layer.
 
-### Observed result: October 14, 2026
+### 📅 Observed Result: October 14, 2026
 
 [Experiment run 38665375428](https://github.com/clekkas/byor-agent/actions/runs/38665375428)
 tested image digest `sha256:870a51a343ddcf34d6f0672ef4474c2375096fe13e8823fbbb7a9b9167da543f`,
@@ -102,7 +126,7 @@ establish its exact cause or prove a universal authentication requirement.
 Both temporary agents were deleted; production BYOR version 20 and mykp
 version 5 were unchanged. Sanitized evidence is attached to the workflow run.
 
-## Platform contract (what the foundation repo provides)
+## 📜 Platform Contract (What the Foundation Repo Provides)
 
 The foundation repo publishes a non-secret contract per environment: `foundry-<env>.json` in the `platform-contract-<env>` workflow artifact. It holds a flat `values` map and a `valuesSha256` over it. This repo consumes these keys unchanged:
 
@@ -123,13 +147,13 @@ Rules:
 - The agent workflow only validates, never edits, the connection. If the live connection (target, `registry_connection` type, `oauth_token_exchange` mode) doesn't match, it fails before Terraform runs; fix it in the foundation repo.
 - Variable names the contract does not carry (`agent` image name, SKU list, model deployment, state coordinates, CPU/memory) are owned here.
 
-## Hosted-agent deployment with Terraform and AzAPI
+## 🏗️ Hosted-Agent Deployment with Terraform and AzAPI
 
 This repository deploys the Foundry hosted agent without `azd deploy`. Terraform manages the logical hosted agent, a Foundry data-plane resource managed by `azapi_data_plane_resource` with type `Microsoft.Foundry/agents@v1`. The registry connection it references is created and owned by the foundation repo.
 
 Changing the configured image creates a version under the existing `private-registry-agent`; it doesn't replace the logical agent. The existing `@latest` endpoint selector makes the newest active version the default while older versions remain in Foundry history.
 
-### Important files and assets
+### 🗂️ Important Files and Assets
 
 | File or asset | Purpose |
 |---|---|
@@ -148,7 +172,7 @@ foundation-tfstate/registry-connection/<environment>.tfstate   (foundation repo;
 
 The agent identity receives `Storage Blob Data Contributor` only on `agent-tfstate`, so it cannot read, lock, update, or delete foundation state. The bootstrap script fails if the identity holds a blob data role anywhere else. The account is private, so Terraform must run from a network with access to its private endpoint, normally the platform-owned self-hosted runner.
 
-### Manual deployment
+### 🖐️ Manual Deployment
 
 Prerequisites:
 
@@ -184,7 +208,7 @@ terraform -chdir=infra/hosted-agent output -raw agent_version
 
 For the first hosted-agent apply, keep `import_existing_agent = true`. Terraform imports the existing logical agent into the new state before writing the requested definition. The import block is idempotent after adoption.
 
-### Manual deployed-agent validation
+### ✅ Manual Deployed-Agent Validation
 
 After apply, acquire a Foundry data-plane token and run the same validation used by CI:
 
@@ -216,7 +240,7 @@ python -m unittest discover -s tests -q
 
 The local `test-local.ps1` and `test-local.sh` entrypoints delegate to the same `test_local.py` checks, honor `BASE`, and propagate failures. They require Python (`python` on PowerShell, `python3` on Bash).
 
-### Gotchas
+### 🧩 Gotchas
 
 - **Use one deployment owner.** After Terraform adopts the agent, don't use `azd deploy` or make unmanaged portal/SDK definition changes to the same agent.
 - **Review the first plan carefully.** It should import and update in place with no destroy. `prevent_destroy = true` provides an additional guard.
@@ -228,7 +252,7 @@ The local `test-local.ps1` and `test-local.sh` entrypoints delegate to the same 
 - **Don't commit local inputs or state.** `terraform.tfvars`, `backend.hcl`, plans, `.terraform/`, and state files are ignored.
 - **The runner must be online.** If the deploy job remains queued, the platform-owned `byor-private` runner is offline; start it per the foundation repo's runbook.
 
-## CI/CD (GitHub Actions)
+## 🔁 CI/CD (GitHub Actions)
 
 One workflow, `deploy-agent.yml`, supports manual dispatch, and every external login uses OIDC rather than a stored cloud or registry credential. Both jobs run in the protected `agent` GitHub Environment (`main` only; required reviewers when the GitHub plan supports them).
 
@@ -239,7 +263,7 @@ One workflow, `deploy-agent.yml`, supports manual dispatch, and every external l
 
 It runs for application and `infra/hosted-agent/` changes. Manual dispatch accepts `image_tag` to redeploy an existing image without building.
 
-### One-time setup
+### 🚦 One-Time Setup
 
 1. **Foundation first.** The foundation repo must have applied for your environment and published its contract (`platform-contract-<env>` artifact), the state account must exist, and a runner labelled `byor-private` must be online for this repository (platform-owned; see the foundation README). This repo must be private or internal.
 2. **Run the bootstrap**, pointing at the downloaded contract:
@@ -265,15 +289,44 @@ It runs for application and `infra/hosted-agent/` changes. Manual dispatch accep
    - Provider URL `https://token.actions.githubusercontent.com`.
    - Identity mapping claims `{"repository":"<owner>/<repo>","ref":"refs/heads/main"}` (the `ref` claim is still present in environment-scoped tokens), scoped to a group or user with Read + Deploy/Cache on the **local** Docker repo behind `JFROG_REPO` (`byor-demo-docker-local`). Pushes to a virtual repo land in its default deployment repo.
 
-### Notes
+### 📝 Notes
 
 - **Why a self-hosted runner:** a subscription policy forces `publicNetworkAccess=Disabled` on storage accounts, so GitHub-hosted runners can't reach Terraform state. The runner and its private endpoint are provisioned by the foundation repo, not here.
 - **Independent workflows:** the agent workflow has no foundation backend variables or registry-connection steps. Container-scoped RBAC prevents its identity from accessing foundation state even if a workflow is modified.
 - **Preflight:** the deploy job checks the contract variables, the project endpoint, the connection (target, type, `oauth_token_exchange` mode), the digest repository and the requested SKU before Terraform runs.
 - **Agent ownership:** `infra/hosted-agent` is the deployment source of truth. The workflow resolves the release tag and passes its immutable JFrog digest URI as `TF_VAR_image_uri`.
 
-## Caveats
+## ⚠️ Caveats
 
 - The Microsoft Learn BYOR article specifies the protocol name and version (`responses` / `2.0.0`) but not the full request/response wire contract for a self-built container. The envelope here follows the standard Responses shape (`output[].content[].output_text` plus the `output_text` convenience field) and accepts `input` as either a plain string or a message array. If Foundry's invoke returns a protocol error, capture the actual request body it sends and adjust `create_response` — the pull path is unaffected.
 - Build `linux/amd64` explicitly. On Apple silicon the wrong arch pulls fine and then never reaches Active.
 - Pinned dependency versions are a starting point — bump before anything customer-facing.
+
+## 🛠️ Commands Reference
+
+| Command | Description |
+|---|---|
+| `./build-and-push.sh` | Build → local smoke test → push to JFrog |
+| `python -m unittest discover -s tests -q` | Offline regression tests (mocked model + Foundry APIs) |
+| `./test-local.ps1` / `./test-local.sh` | Local Responses + health checks against a running container |
+| `./deploy.ps1` / `./deploy.sh` | Manual Terraform plan/apply of the hosted-agent stack |
+| `python scripts/test-hosted-agent.py --endpoint <url> --agent private-registry-agent --version <n> --expected-image <digest> --expected-model <name>` | Verify a specific candidate version is active with the expected image/model |
+| `python scripts/test-registry-no-auth.py --cleanup --evidence <file> --ledger <file>` | Clean up the registry-omission experiment's temporary agents after an interrupted run |
+| `./scripts/bootstrap-github-oidc.ps1 -Repo <owner>/<repo> -ContractFile <file> -StateStorageAccount <account> -Reviewers <reviewers>` | One-time: agent Entra app, RBAC, tfstate container, protected GitHub Environment |
+
+## 📚 Related Repositories
+
+| Repo | Role |
+|---|---|
+| [`jfrog-oidc-foundry`](https://github.com/clekkas/jfrog-oidc-foundry) | Foundation — owns the registry connection, runners, state, and platform contract this repo consumes |
+| [`jfrog-agent-mykp`](https://github.com/clekkas/jfrog-agent-mykp) | Sibling app repo — same pattern, deployed to a second Foundry project |
+| [`byor-agent-dockerhub`](https://github.com/clekkas/byor-agent-dockerhub) | Anonymous-pull proof — public Docker Hub, no registry connection, no OIDC |
+| [`byor-agent-docker`](https://github.com/clekkas/byor-agent-docker) | Anonymous-pull proof — self-hosted registry, no registry connection, no OIDC |
+
+## 🤝 Contributing
+
+This is a reference implementation for a specific workshop engagement. Issues and suggestions are welcome, but expect the scope to stay narrow by design.
+
+## 📄 License
+
+Internal proof-of-concept — no license file; not intended for redistribution outside this engagement.
