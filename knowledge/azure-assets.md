@@ -9,12 +9,12 @@ IDs (subscription, tenant, object and client IDs) are redacted. Secrets are neve
 - **Image pull**: Foundry pulls the image using **OIDC token exchange**. The Foundry project's managed identity exchanges an Entra token for a short-lived JFrog token, so no registry password is stored.
 - **Model**: the agent answers with model **`gpt-5-mini`** through the Foundry project endpoint, using its own platform-managed identity.
 - **CI/CD**: GitHub Actions builds the image, pushes it to JFrog (GitHub OIDC), and applies Terraform for both the registry connection and hosted agent. The agent is managed through the Foundry data plane with AzAPI. All authentication uses OIDC; no secrets are stored.
-- **Azure location**: resource group `kaiser-foundry-rg`, Foundry in **eastus**, CI runner in **swedencentral**. azd environment: `byor-demo`.
+- **Azure location**: resource group `<foundry-resource-group>`, Foundry in **eastus**, CI runner in **swedencentral**. azd environment: `byor-demo`.
 
 ## Foundry
 
-- **Account**: `kaiser-foundry-resource` (eastus), pre-existing
-- **Project**: `workshop-demo-project`, endpoint `https://kaiser-foundry-resource.services.ai.azure.com/api/projects/workshop-demo-project`, identity type: SystemAssigned
+- **Account**: `<foundry-account>` (eastus), pre-existing
+- **Project**: `workshop-demo-project`, endpoint `https://<foundry-account>.services.ai.azure.com/api/projects/workshop-demo-project`, identity type: SystemAssigned
 
 ### Model deployments
 
@@ -46,12 +46,12 @@ The active `jfrog-registry` connection is managed by **Terraform (AzAPI)** in `i
 | 2 | active | 2026-10-06 21:37 UTC | `trialrpqe22.jfrog.io/cl-docker/agent:0.1` | 0.5 CPU / 1Gi | (none: echo mode) |
 | 1 | active | 2026-10-06 21:36 UTC | `trialrpqe22.jfrog.io/cl-docker/agent:0.1` | 0.5 CPU / 1Gi | (none: echo mode) |
 
-## Azure resources in `kaiser-foundry-rg`
+## Azure resources in `<foundry-resource-group>`
 
 | Name | Type | Region | Origin |
 |---|---|---|---|
-| `kaiser-foundry-resource` | Microsoft.CognitiveServices/accounts | eastus | Pre-existing: Foundry |
-| `kaiser-foundry-resource/workshop-demo-project` | Microsoft.CognitiveServices/accounts/projects | eastus | Pre-existing: Foundry |
+| `<foundry-account>` | Microsoft.CognitiveServices/accounts | eastus | Pre-existing: Foundry |
+| `<foundry-account>/workshop-demo-project` | Microsoft.CognitiveServices/accounts/projects | eastus | Pre-existing: Foundry |
 | `byor-ci-runner-01_OsDisk_1_ffb7fab3b34e4d11a67e920b1139afb9` | Microsoft.Compute/disks | swedencentral | Created: CI runner (infra/ci-runner) |
 | `byor-ci-runner-key` | Microsoft.Compute/sshPublicKeys | swedencentral | Created: CI runner (infra/ci-runner) |
 | `byor-ci-runner-01` | Microsoft.Compute/virtualMachines | swedencentral | Created: CI runner (infra/ci-runner) |
@@ -98,8 +98,8 @@ The repo uses GitHub's ID-based ("immutable") OIDC subjects, so the credential c
 
 | Principal | Role | Scope |
 |---|---|---|
-| GitHub Actions deploy identity | Foundry Project Manager | accounts `kaiser-foundry-resource` / projects `workshop-demo-project` |
-| GitHub Actions deploy identity | Reader | resource group `kaiser-foundry-rg` |
+| GitHub Actions deploy identity | Foundry Project Manager | accounts `<foundry-account>` / projects `workshop-demo-project` |
+| GitHub Actions deploy identity | Reader | resource group `<foundry-resource-group>` |
 | GitHub Actions deploy identity | Storage Blob Data Contributor | storageAccounts `tfstateb173d2d85c34` |
 | Operator (user) | Storage Blob Data Contributor | storageAccounts `tfstateb173d2d85c34` |
 

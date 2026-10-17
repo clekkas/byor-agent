@@ -38,7 +38,7 @@ The foundation repo only manages the Foundry side. It never stores JFrog credent
 
 - The logical agent is `private-registry-agent`, a Foundry data-plane resource of type `Microsoft.Foundry/agents@v1`, managed with `azapi_data_plane_resource` in `infra/hosted-agent`. Terraform imports the existing agent instead of recreating it (`import_existing_agent`).
 - Changing the image creates a new version under the same agent; old versions stay in Foundry history. The endpoint routes 100 percent of traffic to `@latest`, so the newest active version becomes the default.
-- The project endpoint has the form `https://<account>.services.ai.azure.com/api/projects/<project>`. Here the account is `kaiser-foundry-resource` and the project is `workshop-demo-project`.
+- The project endpoint has the form `https://<account>.services.ai.azure.com/api/projects/<project>`. Here the account is `<foundry-account>` and the project is `workshop-demo-project`.
 - Allowed sizes (SKUs) are CPU and memory pairs: 0.5 CPU with 1Gi, 1 with 2Gi, and 2 with 4Gi. The list is hardcoded in `main.tf` and also read from the variable `SUPPORTED_AGENT_SKUS`, so the two can drift.
 - A new version has a state: it must reach active; a failed state or a different image fails the smoke test.
 - The platform-managed agent identity can reach project models by default, so no extra role assignment is needed for model mode, and the identity can change between deployments.

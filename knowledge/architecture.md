@@ -24,7 +24,7 @@ Constraints that shape everything: GitHub OIDC to Azure with no stored secrets, 
 
 ## Runners
 
-There are two self-hosted runner VMs, both with the label `byor-private`, both Standard_B2s_v2 Ubuntu 24.04 in swedencentral, in resource group `kaiser-foundry-rg`.
+There are two self-hosted runner VMs, both with the label `byor-private`, both Standard_B2s_v2 Ubuntu 24.04 in swedencentral, in resource group `<foundry-resource-group>`.
 
 | VM | Registered to |
 |---|---|
